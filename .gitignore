@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.idea/
+.pytest_cache/
+.test_deps/
+runs/
+models/
+data/raw/
+data/*_train.jsonl
+data/*_test.jsonl
+data/*_validation.jsonl

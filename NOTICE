@@ -1,0 +1,19 @@
+ReasoningForge (推理工坊)
+
+This project adapts the transparent GRPO training flow from MiniMind:
+https://github.com/jingyaogong/minimind
+
+Local source snapshot at project creation:
+  repository: ../minimind
+  git HEAD: 6fc918beb68a0d8c40452338df6319fe168014ba
+  source files: trainer/train_grpo.py, trainer/rollout_engine.py,
+                trainer/trainer_utils.py, dataset/lm_dataset.py
+  The local checkout included uncommitted user learning annotations/changes.
+
+MiniMind is distributed under the Apache License, Version 2.0.
+The original license text is retained in LICENSE.
+
+ReasoningForge changes: independent Hugging Face model adapter, PEFT LoRA,
+explicit padding/EOS/position alignment, isolated objective functions,
+rule-based verification, microbatch normalization, rollout reuse, checkpoints,
+offline tests, evaluation, and Chinese educational documentation.

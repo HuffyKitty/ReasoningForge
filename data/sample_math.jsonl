@@ -1,0 +1,16 @@
+{"id":"demo-001","dataset":"self_written_demo","prompt":"A box contains 7 red balls and 5 blue balls. How many balls are in the box?","answer":"12"}
+{"id":"demo-002","dataset":"self_written_demo","prompt":"A notebook costs 3 dollars. How much do 8 notebooks cost?","answer":"24"}
+{"id":"demo-003","dataset":"self_written_demo","prompt":"There are 48 cookies. They are divided equally among 6 children. How many cookies does each child receive?","answer":"8"}
+{"id":"demo-004","dataset":"self_written_demo","prompt":"A tank has 35 liters of water. 12 liters are used and then 9 liters are added. How many liters remain?","answer":"32"}
+{"id":"demo-005","dataset":"self_written_demo","prompt":"A train travels at 60 kilometers per hour for 2.5 hours. How many kilometers does it travel?","answer":"150"}
+{"id":"demo-006","dataset":"self_written_demo","prompt":"What is one third of 27?","answer":"9"}
+{"id":"demo-007","dataset":"self_written_demo","prompt":"A shirt costs 80 dollars before a 25 percent discount. What is its price after the discount, in dollars?","answer":"60"}
+{"id":"demo-008","dataset":"self_written_demo","prompt":"Solve for x: 3x + 7 = 22. Give only the numerical value as the final answer.","answer":"5"}
+{"id":"demo-009","dataset":"self_written_demo","prompt":"A farmer packs 120 eggs into cartons of 12. Two full cartons are sold. How many eggs remain?","answer":"96"}
+{"id":"demo-010","dataset":"self_written_demo","prompt":"What is the exact value of 1/4 + 1/2?","answer":"3/4"}
+{"id":"demo-011","dataset":"self_written_demo","prompt":"The temperature is -3 degrees. It falls by 8 degrees. What is the new temperature in degrees?","answer":"-11"}
+{"id":"demo-012","dataset":"self_written_demo","prompt":"A rectangle has perimeter 30 and length 9. What is its width?","answer":"6"}
+{"id":"demo-013","dataset":"self_written_demo","prompt":"How many multiples of 3 are there from 1 to 100 inclusive?","answer":"33"}
+{"id":"demo-014","dataset":"self_written_demo","prompt":"A machine makes 15 parts each hour for 8 hours, but 10 percent are defective. How many good parts are made?","answer":"108"}
+{"id":"demo-015","dataset":"self_written_demo","prompt":"A sum of 200 dollars earns simple interest at 5 percent per year for 3 years. What is the interest earned in dollars?","answer":"30"}
+{"id":"demo-016","dataset":"self_written_demo","prompt":"A bag contains 3 red balls and 7 blue balls. One ball is drawn uniformly at random. What is the probability of drawing a red ball?","answer":"3/10"}

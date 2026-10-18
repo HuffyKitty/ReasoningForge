@@ -1,0 +1,7 @@
+# 先按自己的 CUDA/CPU 安装 PyTorch，再安装其余依赖；已有合适的 torch 不会被替换。
+# 本项目实测 torch 2.7.0+cu126 / Python 3.11，训练代码不依赖 TRL。
+torch>=2.6,<3
+transformers==4.57.6
+peft==0.17.1
+accelerate>=1.0,<2
+safetensors>=0.4.3
