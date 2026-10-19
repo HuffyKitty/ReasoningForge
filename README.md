@@ -4,7 +4,7 @@
 
 保留 MiniMind 的主线：**多回答采样 → 奖励 → 组内相对优势 → policy ratio/clipping → KL → mask → 反向传播**。模型改用 Hugging Face `AutoModelForCausalLM` / `AutoTokenizer`；可以加载 Qwen 等 Dense decoder-only 模型的官方权重，也可以训练完整参数或 PEFT LoRA。代码中的中文注释解释整体关系、张量维度和关键设计。
 
-当前提供标准 GRPO、非对称 clipping、sequence/token 两种损失归一化、规则奖励、同步 PyTorch rollout、日志、训练恢复和 pass@k 评估。**Dynamic Sampling 与 Overlong Reward Shaping 尚未实现；这是一份复现实验基础，并非完整 DAPO 或图片中成绩的复现结果。**
+当前提供标准 GRPO、非对称 clipping、sequence/token 两种损失归一化、规则奖励、同步 PyTorch rollout、训练恢复、固定开发集监控和 pass@k 评估。**Dynamic Sampling 与 Overlong Reward Shaping 尚未实现；这是一份复现实验基础，并非完整 DAPO 或图片中成绩的复现结果。**
 
 ## 从这里开始
 
@@ -63,9 +63,14 @@ PyCharm Run Configuration：Script 选 `train.py`，Parameters 填 `--config con
 ```powershell
 .\.venv\Scripts\python.exe scripts/prepare_data.py --format gsm8k --input data/raw/gsm8k_train.jsonl --output data/gsm8k_train.jsonl --split train
 .\.venv\Scripts\python.exe scripts/prepare_data.py --format gsm8k --input data/raw/gsm8k_test.jsonl --output data/gsm8k_test.jsonl --split test
+.\.venv\Scripts\python.exe scripts/split_data.py --input data/gsm8k_train.jsonl --train-output data/gsm8k_train_split.jsonl --dev-output data/gsm8k_dev.jsonl --dev-count 500 --seed 42
+.\.venv\Scripts\python.exe scripts/audit_data.py --train data/gsm8k_train_split.jsonl --dev data/gsm8k_dev.jsonl --test data/gsm8k_test.jsonl
+.\.venv\Scripts\python.exe scripts/check_prompt_lengths.py --config configs/qwen15b_gsm8k_pilot.json --test data/gsm8k_test.jsonl
 ```
 
 MATH 用 `--format math`，输入字段为 `problem` / `solution`。脚本不下载数据，不自动混合 train/test，也不覆盖已有文件。修改训练配置的 `data_path` 后再开始新实验。
+
+准备好数据后可用 [1.5B GSM8K 40 步试跑配置](configs/qwen15b_gsm8k_pilot.json)在单张大显存 GPU 上验证整条流程。它配置独立开发集，每 20 步评估固定 8 道题、每题采样 8 次，并测固定回答前缀熵；40 步与 8 道开发题均不足以证明算法复现效果。实际租用服务器的命令见 [AutoDL 迁移准备与运行](docs/AutoDL_迁移准备与运行.md)。
 
 固定独立测试集、prompt 和采样设置，先测原基座，再测导出的模型：
 
@@ -77,6 +82,8 @@ MATH 用 `--format math`，输入字段为 `problem` / `solution`。脚本不下
 .\.venv\Scripts\python.exe evaluate.py --config configs/qwen05b_grpo.json --model runs/qwen05b_grpo/final --data data/gsm8k_test.jsonl --num-samples 8 --k 1 8 --output runs/grpo_eval.json
 ```
 
+在**同一开发集**先保存基座评估 JSON 后，训练后评估可加 `--baseline-results runs/base_dev_eval.json`，按基座答题情况把题目分为 `unsolved/mixed/all_correct` 三档。程序会检查数据 SHA256 与逐题题面是否一致。
+
 这里的 pass@1 是随机采样的成功概率估计；pass@8 是一次采 8 个回答至少答对一个的概率估计，均不等同于 greedy accuracy。输出保存逐题回答、奖励、截断和按 `dataset` 分层统计。评估要求二元正确性奖励，不接受任意 shaped reward 作为成功标签。
 
 ## 产物与恢复
@@ -86,9 +93,13 @@ runs/qwen05b_grpo/
   config.json             # 展开默认值的实际配置
   environment.json        # Python/依赖/CUDA 信息
   data_manifest.json      # 数据 SHA256，阻止换数据后按旧位置续训
+  dev_manifest.json       # 固定开发集 SHA256；配置开发集时生成
   model_manifest.json     # 模型类型与可取得的实际 HF revision
-  metrics.jsonl           # 每次优化器更新的指标
-  samples.jsonl           # 采样回答、标准答案与奖励
+  metrics.jsonl           # 每次更新的 reward/优势/格式/长度/ratio/KL/熵等指标
+  samples.jsonl           # 每个新 rollout 的全部 G 个回答、奖励、长度和截断
+  dev_metrics.jsonl       # 定期固定开发集 pass@k、格式率、固定探针熵等
+  dev_samples.jsonl       # 开发集逐题回答；方便人工检查
+  events.jsonl            # 数值异常或 OOM 时记录阶段；无异常则不创建
   checkpoint-000010/
     model/                # 完整 HF 模型或 LoRA adapter，加 tokenizer
     config.json
@@ -116,6 +127,7 @@ runs/qwen05b_grpo/
 7. `checkpoint.py` / `evaluate.py`：复现实验与独立评测。
 
 架构、公式和具体消融步骤见 [架构与实验指南](docs/architecture_and_experiments.md)。测试记录见 [验证记录](docs/validation.md)。
+指标的分母、空值和排查方式见 [GRPO 训练监控指标字典](docs/GRPO_训练监控指标字典.md)。
 
 ## 实现依据
 

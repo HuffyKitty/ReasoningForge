@@ -32,7 +32,7 @@ def make_window(model):
         attention = torch.cat([torch.ones(n, p), mask], dim=1).long()
         with torch.no_grad():
             logps, _ = compute_token_stats(model, ids, attention, p)
-        old = logps - torch.linspace(-0.1, 0.1, n).unsqueeze(1)
+        old = logps - torch.linspace(-0.5, 0.5, n).unsqueeze(1)
         reference = logps + 0.2
         rollout = RolloutBatch(ids, attention, ids[:, p:], mask.long(), old, [""] * n,
                                p, torch.zeros(n, dtype=torch.bool))
@@ -55,6 +55,9 @@ class TrainingTests(unittest.TestCase):
                     clip_low=0.2, clip_high=0.28, loss_reduction=reduction)
                 metrics = backward_window(actual, prepared, config, statistics)
                 whole_loss = torch.tensor(0.)
+                ratio_parts = []
+                positive_parts = []
+                positive_clipped_parts = []
                 for item in prepared:
                     rollout = item.rollout
                     logps, _ = compute_token_stats(expected, rollout.input_ids,
@@ -62,11 +65,20 @@ class TrainingTests(unittest.TestCase):
                     result = grpo_loss(logps, rollout.old_logps, item.advantages,
                         rollout.completion_mask, ref_logps=item.reference_logps,
                         beta=0.05, clip_low=0.2, clip_high=0.28, reduction=reduction)
+                    ratio_parts.append(result.diagnostics["ratio"])
+                    positive_parts.append(result.diagnostics["positive_advantage"])
+                    positive_clipped_parts.append(result.diagnostics["positive_clipped"])
                     weight = (logps.size(0) / statistics["training_sequences"] if reduction == "sequence"
                               else rollout.completion_mask.sum().item() / statistics["training_tokens"])
                     whole_loss = whole_loss + result.loss * weight
                 whole_loss.backward()
                 self.assertAlmostEqual(metrics["loss"], whole_loss.item(), places=6)
+                ratios = torch.cat(ratio_parts)
+                self.assertAlmostEqual(metrics["ratio_p99"], torch.quantile(ratios, 0.99).item(), places=6)
+                positive = torch.cat(positive_parts)
+                clipped = torch.cat(positive_clipped_parts)
+                self.assertAlmostEqual(metrics["positive_clip_fraction"],
+                                       clipped[positive].float().mean().item(), places=6)
                 torch.testing.assert_close(actual.table.weight.grad, expected.table.weight.grad)
                 self.assertEqual(statistics["training_prompts"], 3)
                 self.assertEqual(statistics["training_sequences"], 6)

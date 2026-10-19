@@ -78,9 +78,12 @@ def load_training_state(path: Path, config, fingerprint: str) -> dict:
     if state["data_fingerprint"] != fingerprint:
         raise ValueError("训练数据发生变化，请开始新的实验；不能按旧游标恢复")
     # 可以延长训练、调整日志频率，不能悄悄换模型/奖励/优化目标继续同一实验。
-    mutable = {"epochs", "max_steps", "save_steps", "log_steps", "output_dir", "data_path", "local_files_only"}
+    mutable = {"epochs", "max_steps", "save_steps", "log_steps", "eval_steps",
+               "output_dir", "data_path", "local_files_only"}
+    # 老 checkpoint 没有后来新增的纯监控配置时，按当时等价的默认值比较。
+    defaults = type(config)().to_dict()
     changed = [name for name, value in config.to_dict().items()
-               if name not in mutable and state["config"].get(name) != value]
+               if name not in mutable and state["config"].get(name, defaults[name]) != value]
     if changed:
         raise ValueError(f"恢复时改变了训练语义 {changed}；请使用原配置或开启新实验")
     return state

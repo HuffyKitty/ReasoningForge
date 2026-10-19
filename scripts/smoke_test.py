@@ -123,6 +123,16 @@ def assert_artifacts(output_dir: Path, expected_step: int, *, lora: bool) -> Pat
     rows = [json.loads(line) for line in (output_dir / "metrics.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
     if len(rows) < expected_step:
         raise AssertionError("恢复训练后 metrics.jsonl 应追加记录，而不是覆盖旧日志。")
+    for key in ("mixed_group_fraction", "answer_extraction_rate", "response_length_p90",
+                "prompt_truncation_fraction", "ratio_p99", "positive_clip_fraction"):
+        if key not in rows[-1]:
+            raise AssertionError(f"训练日志缺少诊断指标：{key}")
+    dev_rows = [json.loads(line) for line in (output_dir / "dev_metrics.jsonl").read_text(encoding="utf-8").splitlines()]
+    if len(dev_rows) != expected_step or "probe_entropy_p10" not in dev_rows[-1]["probe"]:
+        raise AssertionError("固定开发集指标或熵探针缺失")
+    sample_rows = [json.loads(line) for line in (output_dir / "samples.jsonl").read_text(encoding="utf-8").splitlines()]
+    if len(sample_rows) != expected_step * 2 or any("response_tokens" not in row for row in sample_rows):
+        raise AssertionError("应保存每个新 rollout 的全部回答及长度")
     # 这里只读取本测试生成的可信临时 checkpoint，里面包含优化器和 RNG 状态。
     state = torch.load(checkpoint / "trainer_state.pt", map_location="cpu", weights_only=False)
     if not isinstance(state, dict):
@@ -198,6 +208,10 @@ def main() -> None:
             {"id": "tiny-1", "prompt": "2 + 1 = ?", "answer": "3", "dataset": "smoke"},
         ]
         data_path.write_text("\n".join(json.dumps(item) for item in examples) + "\n", encoding="utf-8")
+        dev_path = root / "tiny-dev.jsonl"
+        dev_path.write_text(json.dumps({
+            "id": "tiny-dev-0", "prompt": "4 + 1 = ?", "answer": "5", "dataset": "smoke",
+        }) + "\n", encoding="utf-8")
         # 纯测试 fixture：用交替奖励保证组内优势非零，不假装随机模型会答对数学题。
         # 正式实验必须使用真实 verifier；这个函数只存在于自动清理的临时目录。
         (root / "smoke_reward_fixture.py").write_text(
@@ -210,6 +224,8 @@ def main() -> None:
         )
         config = {
             "model_name_or_path": str(model_path), "data_path": str(data_path),
+            "dev_data_path": str(dev_path), "eval_steps": 1, "eval_num_samples": 2,
+            "eval_limit": 1, "probe_prompts": 1,
             "device": "cpu", "dtype": "float32", "local_files_only": True,
             "beta": 0.02, "epochs": 2, "prompt_batch_size": 1, "num_generations": 2,
             "max_prompt_length": 32, "max_new_tokens": 4,

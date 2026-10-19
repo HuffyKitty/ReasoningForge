@@ -34,6 +34,47 @@ class GRPOObjectivesTest(unittest.TestCase):
         result.loss.backward()
         torch.testing.assert_close(logps.grad, torch.zeros_like(logps))
 
+    def test_policy_diagnostics_use_only_valid_tokens_and_sign_specific_denominators(self):
+        # Padding 故意放 NaN：它既不能影响 loss，也不能混入分位数或裁剪率。
+        ratios = torch.tensor([
+            [1.1, 1.5, float("nan")],
+            [0.5, 0.9, float("nan")],
+            [1.0, 1.0, 1.0],
+        ])
+        mask = torch.tensor([[1, 1, 0], [1, 1, 0], [1, 1, 1]])
+        result = grpo_loss(
+            ratios.log(), torch.zeros_like(ratios), torch.tensor([1.0, -1.0, 0.0]), mask,
+            clip_low=0.2, clip_high=0.2,
+        )
+        self.assertAlmostEqual(result.metrics["clip_fraction"], 2 / 7, places=6)
+        self.assertAlmostEqual(result.metrics["positive_clip_fraction"], 0.5, places=6)
+        self.assertAlmostEqual(result.metrics["negative_clip_fraction"], 0.5, places=6)
+        self.assertAlmostEqual(result.metrics["ratio_p05"], 0.62, places=5)
+        self.assertAlmostEqual(result.metrics["ratio_p50"], 1.0, places=5)
+        self.assertAlmostEqual(result.metrics["ratio_p95"], 1.38, places=5)
+        self.assertAlmostEqual(result.metrics["ratio_p99"], 1.476, places=5)
+        self.assertAlmostEqual(
+            result.metrics["log_ratio_p99"],
+            math.log(1.1) + 0.94 * (math.log(1.5) - math.log(1.1)), places=5,
+        )
+        torch.testing.assert_close(result.diagnostics["ratio"], torch.tensor([1.1, 1.5, 0.5, 0.9, 1, 1, 1]))
+        torch.testing.assert_close(result.diagnostics["positive_advantage"], torch.tensor([1, 1, 0, 0, 0, 0, 0], dtype=torch.bool))
+        torch.testing.assert_close(result.diagnostics["negative_advantage"], torch.tensor([0, 0, 1, 1, 0, 0, 0], dtype=torch.bool))
+        torch.testing.assert_close(result.diagnostics["positive_clipped"], torch.tensor([0, 1, 0, 0, 0, 0, 0], dtype=torch.bool))
+        torch.testing.assert_close(result.diagnostics["negative_clipped"], torch.tensor([0, 0, 1, 0, 0, 0, 0], dtype=torch.bool))
+        self.assertEqual(result.diagnostics["ratio"].device.type, "cpu")
+        self.assertFalse(result.diagnostics["ratio"].requires_grad)
+
+    def test_sign_specific_clip_fraction_is_zero_when_no_eligible_advantage(self):
+        # 全对或全错的 GRPO 组优势为零，不能拿所有 token 作正/负裁剪率的分母。
+        logps = torch.tensor([[math.log(2.0), math.log(0.5)]])
+        result = grpo_loss(logps, torch.zeros_like(logps), torch.zeros(1), torch.ones_like(logps))
+        self.assertEqual(result.metrics["positive_clip_fraction"], 0.0)
+        self.assertEqual(result.metrics["negative_clip_fraction"], 0.0)
+        self.assertEqual(result.metrics["clip_fraction"], 0.0)
+        self.assertFalse(result.diagnostics["positive_advantage"].any())
+        self.assertFalse(result.diagnostics["negative_advantage"].any())
+
     def test_unclipped_gradient_pushes_good_up_and_bad_down(self):
         logps = torch.tensor([[math.log(1.1)], [math.log(0.9)]], requires_grad=True)
         result = grpo_loss(

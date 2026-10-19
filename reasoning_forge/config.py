@@ -29,6 +29,8 @@ class TrainConfig:
     gradient_checkpointing: bool = True
 
     data_path: str = "data/sample_math.jsonl"
+    # 固定开发集只用于观测，不参与梯度更新；eval_steps=0 时不做周期评测。
+    dev_data_path: str | None = None
     output_dir: str = "runs/qwen05b_grpo"
     prompt_format: str = "chat"  # 没有 chat_template 的原始 Base 模型可显式选择 plain。
     system_prompt: str = "Solve the problem carefully. End with the final answer in \\boxed{...}."
@@ -60,12 +62,18 @@ class TrainConfig:
     seed: int = 42
     save_steps: int = 10
     log_steps: int = 1
+    eval_steps: int = 0
+    eval_num_samples: int = 8
+    eval_limit: int = 32
+    probe_prompts: int = 8
+    probe_response_prefix: str = "Let's solve this step by step."
 
     def validate(self) -> None:
         positive_ints = (
             "prompt_batch_size", "num_generations", "max_prompt_length", "max_new_tokens",
             "rollout_micro_batch_size", "train_micro_batch_size", "epochs",
             "gradient_accumulation_steps", "updates_per_rollout", "save_steps", "log_steps", "lora_rank", "lora_alpha",
+            "eval_num_samples", "eval_limit", "probe_prompts",
         )
         for name in positive_ints:
             value = getattr(self, name)
@@ -73,7 +81,7 @@ class TrainConfig:
                 raise ValueError(f"{name} 必须是正整数")
         if self.num_generations < 2:
             raise ValueError("GRPO 至少需要每题两个回答，num_generations >= 2")
-        for name in ("max_steps", "top_k", "seed"):
+        for name in ("max_steps", "top_k", "seed", "eval_steps"):
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise ValueError(f"{name} 必须是非负整数")
@@ -103,6 +111,12 @@ class TrainConfig:
             raise ValueError("chat_template_kwargs 必须是 JSON 对象")
         if not self.model_name_or_path or not self.reward_function:
             raise ValueError("模型路径和奖励函数不能为空")
+        if self.dev_data_path is not None and (not isinstance(self.dev_data_path, str) or not self.dev_data_path.strip()):
+            raise ValueError("dev_data_path 必须是非空路径，或设为 null")
+        if self.eval_steps and self.dev_data_path is None:
+            raise ValueError("eval_steps > 0 时必须指定 dev_data_path")
+        if not isinstance(self.probe_response_prefix, str) or not self.probe_response_prefix.strip():
+            raise ValueError("probe_response_prefix 必须是非空字符串")
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -118,7 +132,9 @@ def load_config(path: str | Path) -> TrainConfig:
     if unknown:
         raise ValueError(f"未知配置项：{sorted(unknown)}")
     config = TrainConfig(**raw)
-    for name in ("data_path", "output_dir"):
+    for name in ("data_path", "dev_data_path", "output_dir"):
+        if getattr(config, name) is None:
+            continue
         value = Path(getattr(config, name)).expanduser()
         setattr(config, name, str(value if value.is_absolute() else (PROJECT_ROOT / value).resolve()))
     # HF 仓库 ID 里也有 '/'，只有确实存在的项目内目录才视为本地模型路径。

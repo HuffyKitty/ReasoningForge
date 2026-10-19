@@ -17,8 +17,15 @@ def main():
     if args.check_config:
         from reasoning_forge.data import load_jsonl
         samples = load_jsonl(config.data_path)
+        dev_samples = load_jsonl(config.dev_data_path) if config.dev_data_path else []
+        if dev_samples:
+            train_ids = {(sample.dataset, sample.id) for sample in samples}
+            train_prompts = {sample.prompt.strip() for sample in samples}
+            if any((sample.dataset, sample.id) in train_ids or sample.prompt.strip() in train_prompts
+                   for sample in dev_samples):
+                raise ValueError("训练集与开发集存在重复题目或重复 dataset/id")
         print(json.dumps(config.to_dict(), ensure_ascii=False, indent=2))
-        print(f"配置有效：{len(samples)} 道题目；该命令尚未加载模型。")
+        print(f"配置有效：训练 {len(samples)} 道题，开发 {len(dev_samples)} 道题；该命令尚未加载模型。")
         return
     from reasoning_forge.trainer import train
     train(config, resume=args.resume)

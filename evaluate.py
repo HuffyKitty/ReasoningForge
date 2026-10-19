@@ -15,8 +15,11 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any
+
+from reasoning_forge.rewards import extract_final_answer, normalize_answer
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -54,7 +57,27 @@ def binary_reward(value: Any) -> float:
     return result
 
 
-def summarize_results(records: list[dict], ks: list[int]) -> dict:
+def baseline_difficulty_map(payload: dict, expected_sha256: str) -> dict[tuple[str, str], tuple[str, str]]:
+    """把训练前基座的逐题采样结果冻结成难度标签，不用训练后成绩重新分层。"""
+    if payload.get("data", {}).get("sha256") != expected_sha256:
+        raise ValueError("基座评估的数据 SHA256 与当前评估数据不同，不能用于难度分层。")
+    mapping = {}
+    for row in payload.get("samples", []):
+        rewards = [binary_reward(value) for value in row["rewards"]]
+        if not rewards:
+            raise ValueError("基座评估存在没有回答的题目。")
+        successes = sum(value == 1.0 for value in rewards)
+        level = "unsolved" if successes == 0 else "all_correct" if successes == len(rewards) else "mixed"
+        key = row["dataset"], str(row["id"])
+        if key in mapping:
+            raise ValueError(f"基座评估出现重复题目：{key}")
+        mapping[key] = level, row["prompt"]
+    if not mapping:
+        raise ValueError("基座评估没有逐题 samples。")
+    return mapping
+
+
+def summarize_results(records: list[dict], ks: list[int], max_prompt_length: int | None = None) -> dict:
     """先逐题估计再平均，每题等权；同时按 dataset 分层报告。"""
 
     if not records:
@@ -65,6 +88,12 @@ def summarize_results(records: list[dict], ks: list[int]) -> dict:
     def summarize_group(group: list[dict]) -> dict:
         totals = {f"pass@{k}": 0.0 for k in ks}
         length_sum, response_count, truncated_count = 0, 0, 0
+        all_lengths: list[int] = []
+        correct_lengths: list[int] = []
+        incorrect_lengths: list[int] = []
+        parsed_count = parsed_correct = truncated_without_answer = 0
+        answer_diversity_sum = response_repetition_sum = 0.0
+        has_completions = all("completions" in record for record in group)
         for record in group:
             rewards = [binary_reward(value) for value in record["rewards"]]
             n, c = len(rewards), sum(value == 1.0 for value in rewards)
@@ -73,24 +102,73 @@ def summarize_results(records: list[dict], ks: list[int]) -> dict:
             for k in ks:
                 totals[f"pass@{k}"] += estimate_pass_at_k(n, c, k)
             length_sum += sum(record["lengths"])
+            all_lengths.extend(record["lengths"])
             response_count += n
             truncated_count += sum(record["truncated"])
-        return {
+            if has_completions:
+                completions = record["completions"]
+                if len(completions) != n:
+                    raise ValueError("每题 completions 与 rewards 长度必须一致。")
+                answers = [extract_final_answer(text) for text in completions]
+                parsed_count += sum(answer is not None for answer in answers)
+                parsed_correct += sum(answer is not None and reward == 1.0 for answer, reward in zip(answers, rewards))
+                truncated_without_answer += sum(stop and answer is None for stop, answer in zip(record["truncated"], answers))
+                correct_lengths.extend(length for length, reward in zip(record["lengths"], rewards) if reward == 1.0)
+                incorrect_lengths.extend(length for length, reward in zip(record["lengths"], rewards) if reward == 0.0)
+                answer_diversity_sum += len({normalize_answer(answer) for answer in answers if answer is not None}) / n
+                response_repetition_sum += 1 - len({re.sub(r"\s+", " ", text).strip() for text in completions}) / n
+        result = {
             "prompts": len(group),
             "responses": response_count,
             **{name: total / len(group) for name, total in totals.items()},
             "mean_response_tokens": length_sum / response_count,
             "truncated_fraction": truncated_count / response_count,
         }
+        if has_completions:
+            ordered = sorted(all_lengths)
+            result.update({
+                "answer_extraction_rate": parsed_count / response_count,
+                "format_rate": parsed_count / response_count,
+                "answer_accuracy_given_extracted": parsed_correct / parsed_count if parsed_count else None,
+                "final_answer_diversity": answer_diversity_sum / len(group),
+                "response_repetition_fraction": response_repetition_sum / len(group),
+                "response_length_p50": ordered[math.ceil(0.50 * response_count) - 1],
+                "response_length_p90": ordered[math.ceil(0.90 * response_count) - 1],
+                "response_length_p99": ordered[math.ceil(0.99 * response_count) - 1],
+                "correct_response_length": sum(correct_lengths) / len(correct_lengths) if correct_lengths else None,
+                "incorrect_response_length": sum(incorrect_lengths) / len(incorrect_lengths) if incorrect_lengths else None,
+                "truncated_unparseable_fraction": truncated_without_answer / response_count,
+                "truncated_answer_missing_rate": truncated_without_answer / truncated_count if truncated_count else None,
+            })
+        if max_prompt_length is not None and all("prompt_tokens" in record for record in group):
+            result["prompt_truncation_fraction"] = sum(
+                record["prompt_tokens"] > max_prompt_length for record in group
+            ) / len(group)
+        return result
 
     datasets = sorted({record["dataset"] for record in records})
-    return {
+    result = {
         "overall": summarize_group(records),
         "by_dataset": {
             dataset: summarize_group([record for record in records if record["dataset"] == dataset])
             for dataset in datasets
         },
     }
+    if all("prompt_tokens" in record for record in records):
+        def length_bucket(tokens: int) -> str:
+            return "0-128" if tokens <= 128 else "129-256" if tokens <= 256 else "257+"
+        result["by_prompt_length"] = {
+            bucket: summarize_group([record for record in records if length_bucket(record["prompt_tokens"]) == bucket])
+            for bucket in ("0-128", "129-256", "257+")
+            if any(length_bucket(record["prompt_tokens"]) == bucket for record in records)
+        }
+    if all("baseline_difficulty" in record for record in records):
+        result["by_baseline_difficulty"] = {
+            level: summarize_group([record for record in records if record["baseline_difficulty"] == level])
+            for level in ("unsolved", "mixed", "all_correct")
+            if any(record["baseline_difficulty"] == level for record in records)
+        }
+    return result
 
 
 def _project_path(path: Path) -> Path:
@@ -108,6 +186,8 @@ def main() -> None:
     parser.add_argument("--num-samples", type=int, default=8, help="每题随机采样回答数 n")
     parser.add_argument("--k", type=int, nargs="+", default=[1, 8], help="要报告的 pass@k，所有 k 必须 <= n")
     parser.add_argument("--limit", type=int, help="仅评测文件中前若干道题，便于小规模检查")
+    parser.add_argument("--baseline-results", type=Path,
+                        help="可选：同一数据的训练前基座评估 JSON；按基座采样成绩分层")
     parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "runs/evaluation.json", help="新的 JSON 结果文件，拒绝覆盖")
     args = parser.parse_args()
     if args.num_samples < 1:
@@ -134,8 +214,19 @@ def main() -> None:
     data_path = _project_path(args.data) if args.data else Path(config.data_path)
     samples = load_jsonl(data_path)
     total_available = len(samples)
+    data_sha256 = data_fingerprint(data_path)
     if args.limit is not None:
         samples = samples[:args.limit]
+    baseline = None
+    if args.baseline_results:
+        baseline_path = _project_path(args.baseline_results)
+        baseline = baseline_difficulty_map(
+            json.loads(baseline_path.read_text(encoding="utf-8")), data_sha256,
+        )
+        for sample in samples:
+            key = sample.dataset, sample.id
+            if key not in baseline or baseline[key][1] != sample.prompt:
+                parser.error(f"基座评估缺少同一题面：{key}；请先用同一完整开发集评估基座。")
     model_path = _project_path(args.model) if args.model else None
     if model_path is not None:
         if not model_path.is_dir():
@@ -163,6 +254,9 @@ def main() -> None:
     for first in range(0, len(samples), config.prompt_batch_size):
         current = samples[first:first + config.prompt_batch_size]
         prompts = [render_prompt(sample, bundle.tokenizer, config) for sample in current]
+        prompt_lengths = [len(row) for row in bundle.tokenizer(
+            prompts, add_special_tokens=False, truncation=False, padding=False,
+        )["input_ids"]]
         # 与训练共用模型、模板和 rollout，避免评测另写一套生成流程后发生格式漂移。
         # 此处虽然不训练，rollout 仍计算 old_logps，便于保持统一接口；后续可优化吞吐。
         rollout = engine.rollout(prompts, num_generations=args.num_samples)
@@ -171,27 +265,31 @@ def main() -> None:
         truncated = rollout.truncated.tolist()
         for index, sample in enumerate(current):
             start, end = index * args.num_samples, (index + 1) * args.num_samples
-            records.append({
+            record = {
                 "id": sample.id,
                 "dataset": sample.dataset,
                 "prompt": sample.prompt,
                 "answer": sample.answer,
+                "prompt_tokens": prompt_lengths[index],
                 "completions": rollout.completions[start:end],
                 "rewards": scores[start:end],
                 "lengths": lengths[start:end],
                 "truncated": truncated[start:end],
-            })
+            }
+            if baseline is not None:
+                record["baseline_difficulty"] = baseline[(sample.dataset, sample.id)][0]
+            records.append(record)
         print(f"已评测 {len(records)}/{len(samples)} 道题")
         del rollout
 
-    metrics = summarize_results(records, ks)
+    metrics = summarize_results(records, ks, max_prompt_length=config.max_prompt_length)
     payload = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "metric_description": "Stochastic pass@k estimated by 1-C(n-c,k)/C(n,k); equal weight per prompt. pass@1 is not greedy accuracy.",
         "config": config.to_dict(),
         "model": str(model_path) if model_path else config.model_name_or_path,
         "model_kind": "lora_adapter" if config.lora else "full_model",
-        "data": {"path": str(data_path), "sha256": data_fingerprint(data_path), "total_available": total_available, "evaluated": len(samples)},
+        "data": {"path": str(data_path), "sha256": data_sha256, "total_available": total_available, "evaluated": len(samples)},
         "num_samples": args.num_samples,
         "k": ks,
         "environment": environment_info(),

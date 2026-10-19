@@ -21,9 +21,12 @@ from .checkpoint import (
     save_checkpoint, seed_everything, write_json,
 )
 from .data import load_jsonl, render_prompt
+from .monitoring import prompt_truncation_diagnostics, rollout_diagnostics
 from .models import compute_token_stats, load_bundle
 from .objectives import group_advantages, grpo_loss
+from .rewards import extract_final_answer
 from .rollout import PytorchRolloutEngine, RolloutBatch
+from .validation import evaluate_dev
 
 
 def load_reward_function(spec: str):
@@ -61,6 +64,16 @@ def append_jsonl(path: Path, record: dict) -> None:
         handle.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
 
 
+def record_failure(output_dir: Path, step: int, stage: str, error: Exception) -> None:
+    """数值错误和 OOM 留下可定位的事件；异常仍向上传播，绝不静默续训。"""
+    try:
+        append_jsonl(output_dir / "events.jsonl", {
+            "step": step, "stage": stage, "type": type(error).__name__, "message": str(error)[:1000],
+        })
+    except OSError:
+        pass  # 磁盘也故障时保留原始训练异常。
+
+
 @dataclass
 class PreparedRollout:
     """只缓存 token 与 [N,R] 概率，不缓存大词表 logits 或带梯度计算图。"""
@@ -70,6 +83,7 @@ class PreparedRollout:
     rewards: torch.Tensor
     advantages: torch.Tensor
     reference_logps: torch.Tensor | None
+    rendered_prompts: list[str] | None = None
 
 
 def prepare_window(window, bundle, engine, reward_function, config) -> list[PreparedRollout]:
@@ -98,18 +112,19 @@ def prepare_window(window, bundle, engine, reward_function, config) -> list[Prep
                     )
                     pieces.append(lp)
             reference_logps = torch.cat(pieces).detach()
-        prepared.append(PreparedRollout(current_samples, rollout, rewards, advantages, reference_logps))
+        prepared.append(PreparedRollout(current_samples, rollout, rewards, advantages, reference_logps, prompts))
     return prepared
 
 
-def window_statistics(prepared: list[PreparedRollout], generations: int) -> dict:
+def window_statistics(prepared: list[PreparedRollout], generations: int,
+                      tokenizer=None, max_prompt_length: int | None = None) -> dict:
     """按真实回答数/组数统计，避免最后一小批与完整 batch 被错误地等权平均。"""
     rewards = torch.cat([item.rewards for item in prepared])
     advantages = torch.cat([item.advantages for item in prepared])
     lengths = torch.cat([item.rollout.completion_mask.sum(1) for item in prepared])
     truncated = torch.cat([item.rollout.truncated for item in prepared])
     group_std = rewards.view(-1, generations).std(dim=1, unbiased=False)
-    return {
+    stats = {
         "reward_mean": rewards.mean().item(),
         "reward_std": rewards.std(unbiased=False).item(),
         "group_reward_std": group_std.mean().item(),
@@ -121,6 +136,27 @@ def window_statistics(prepared: list[PreparedRollout], generations: int) -> dict
         "training_sequences": int(lengths.numel()),
         "training_prompts": sum(len(item.samples) for item in prepared),
     }
+    # 每份 PreparedRollout 可能有不同 R，只合并一维有效长度，避免 [N,R] 拼接报错。
+    diagnostics = rollout_diagnostics(
+        rewards, [text for item in prepared for text in item.rollout.completions],
+        lengths, truncated, generations,
+    )
+    stats.update(diagnostics)
+    stats["format_rate"] = diagnostics["answer_extraction_rate"]
+    stats["mixed_group_count"] = (
+        int(round(diagnostics["mixed_group_fraction"] * stats["training_prompts"]))
+        if diagnostics["mixed_group_fraction"] is not None else None
+    )
+    stats["mixed_groups_per_100_new_groups"] = (
+        100.0 * diagnostics["mixed_group_fraction"]
+        if diagnostics["mixed_group_fraction"] is not None else None
+    )
+    if tokenizer is not None and max_prompt_length is not None:
+        prompts = [prompt for item in prepared for prompt in (item.rendered_prompts or [])]
+        if len(prompts) != stats["training_prompts"]:
+            raise ValueError("窗口内题目与渲染后 prompt 数量不一致")
+        stats.update(prompt_truncation_diagnostics(prompts, tokenizer, max_prompt_length))
+    return stats
 
 
 def backward_window(actor, prepared: list[PreparedRollout], config, statistics: dict) -> dict:
@@ -133,6 +169,7 @@ def backward_window(actor, prepared: list[PreparedRollout], config, statistics: 
     aggregate = {name: 0.0 for name in (
         "loss", "policy_loss", "reference_kl_k3", "ratio_mean", "clip_fraction",
     )}
+    diagnostics: dict[str, list[torch.Tensor]] = {}
     total_tokens = statistics["training_tokens"]
     total_sequences = statistics["training_sequences"]
     entropy_sum = 0.0
@@ -157,12 +194,29 @@ def backward_window(actor, prepared: list[PreparedRollout], config, statistics: 
                       if config.loss_reduction == "sequence" else token_fraction)
             (result.loss * weight).backward()
             for name, value in result.metrics.items():
+                if name not in aggregate:
+                    continue  # 分位数不能先对 microbatch 求再平均，窗口结束统一计算。
                 # loss 跟随所选训练目标；其他概率/熵指标统一按有效 token 统计。
                 aggregate[name] += value * (weight if name == "loss" else token_fraction)
+            for name, values in result.diagnostics.items():
+                diagnostics.setdefault(name, []).append(values)
             entropy_sum += (entropy * mask).sum().item()
             # 每块立即反传、释放图，避免把所有大词表 logits 留到窗口末尾。
             del current_logps, entropy, result
     aggregate["entropy"] = entropy_sum / total_tokens
+    merged = {name: torch.cat(chunks) for name, chunks in diagnostics.items()}
+    for name in ("ratio", "log_ratio"):
+        values = merged[name].float()
+        quantiles = torch.quantile(values, torch.tensor([0.05, 0.50, 0.95, 0.99]))
+        for label, value in zip(("p05", "p50", "p95", "p99"), quantiles):
+            aggregate[f"{name}_{label}"] = value.item()
+    for sign in ("positive", "negative"):
+        active = merged[f"{sign}_advantage"]
+        clipped = merged[f"{sign}_clipped"]
+        aggregate[f"{sign}_advantage_tokens"] = int(active.sum().item())
+        aggregate[f"{sign}_clip_fraction"] = (
+            clipped[active].float().mean().item() if bool(active.any()) else 0.0
+        )
     return aggregate
 
 
@@ -172,6 +226,14 @@ def train(config, resume: Path | None = None) -> None:
     config.validate()
     samples = load_jsonl(config.data_path)
     fingerprint = data_fingerprint(config.data_path)
+    dev_samples = load_jsonl(config.dev_data_path) if config.dev_data_path else None
+    dev_fingerprint = data_fingerprint(config.dev_data_path) if config.dev_data_path else None
+    if dev_samples is not None:
+        train_ids = {(sample.dataset, sample.id) for sample in samples}
+        train_prompts = {sample.prompt.strip() for sample in samples}
+        if any((sample.dataset, sample.id) in train_ids or sample.prompt.strip() in train_prompts
+               for sample in dev_samples):
+            raise ValueError("训练集与开发集存在重复题目或重复 dataset/id；请先修正数据划分")
     state = load_training_state(resume.resolve(), config, fingerprint) if resume else None
     output_dir = Path(config.output_dir)
     if not resume and output_dir.exists() and any(output_dir.iterdir()):
@@ -181,6 +243,14 @@ def train(config, resume: Path | None = None) -> None:
         with (output_dir / "metrics.jsonl").open(encoding="utf-8") as handle:
             if any(json.loads(line)["step"] > state["global_step"] for line in handle if line.strip()):
                 raise ValueError("输出目录已有比恢复点更新的日志；请恢复最新检查点，或改用新的 output_dir")
+    if state and (output_dir / "dev_metrics.jsonl").exists():
+        with (output_dir / "dev_metrics.jsonl").open(encoding="utf-8") as handle:
+            if any(json.loads(line)["step"] > state["global_step"] for line in handle if line.strip()):
+                raise ValueError("开发集日志比恢复点更新；请恢复最新检查点或另建 output_dir")
+    if state and dev_fingerprint is not None and (output_dir / "dev_manifest.json").exists():
+        existing = json.loads((output_dir / "dev_manifest.json").read_text(encoding="utf-8"))
+        if existing.get("sha256") != dev_fingerprint:
+            raise ValueError("开发集内容已改变，不能将两份开发曲线写入同一实验")
     output_dir.mkdir(parents=True, exist_ok=True)
     seed_everything(config.seed)
     bundle = load_bundle(config, resume_model_path=resume.resolve() / "model" if resume else None)
@@ -199,6 +269,11 @@ def train(config, resume: Path | None = None) -> None:
     write_json(output_dir / "config.json", config.to_dict())
     write_json(output_dir / "environment.json", environment_info())
     write_json(output_dir / "data_manifest.json", {"path": config.data_path, "sha256": fingerprint, "count": len(samples)})
+    if dev_samples is not None:
+        write_json(output_dir / "dev_manifest.json", {
+            "path": config.dev_data_path, "sha256": dev_fingerprint, "count": len(dev_samples),
+            "periodic_limit": min(config.eval_limit, len(dev_samples)),
+        })
     write_json(output_dir / "model_manifest.json", {
         "source": config.model_name_or_path, "requested_revision": config.revision,
         "resolved_revision": getattr(actor.config, "_commit_hash", None),
@@ -219,8 +294,13 @@ def train(config, resume: Path | None = None) -> None:
             begin = time.perf_counter()
             # 1. 先采齐 K 批，期间不更新 Actor；缓存内所有 old_logps 来自同一旧策略。
             window = batches[batch_index:batch_index + config.gradient_accumulation_steps]
-            prepared = prepare_window(window, bundle, engine, reward_function, config)
-            statistics = window_statistics(prepared, config.num_generations)
+            try:
+                prepared = prepare_window(window, bundle, engine, reward_function, config)
+                statistics = window_statistics(prepared, config.num_generations,
+                                               bundle.tokenizer, config.max_prompt_length)
+            except Exception as error:
+                record_failure(output_dir, global_step, "rollout_or_reward", error)
+                raise
             window_start_step = global_step
             updates = config.updates_per_rollout
             if config.max_steps:
@@ -231,12 +311,16 @@ def train(config, resume: Path | None = None) -> None:
             for update_index in range(updates):
                 step_begin = begin if update_index == 0 else time.perf_counter()
                 optimizer.zero_grad(set_to_none=True)
-                metrics = backward_window(actor, prepared, config, statistics)
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    trainable, config.max_grad_norm if config.max_grad_norm > 0 else float("inf"),
-                    error_if_nonfinite=True,
-                )
-                optimizer.step()
+                try:
+                    metrics = backward_window(actor, prepared, config, statistics)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        trainable, config.max_grad_norm if config.max_grad_norm > 0 else float("inf"),
+                        error_if_nonfinite=True,
+                    )
+                    optimizer.step()
+                except Exception as error:
+                    record_failure(output_dir, global_step, "backward_or_optimizer", error)
+                    raise
                 optimizer.zero_grad(set_to_none=True)
                 global_step += 1  # max_steps 始终以 optimizer.step 次数计数。
                 metrics.update(statistics)
@@ -256,16 +340,22 @@ def train(config, resume: Path | None = None) -> None:
                           f"reward={metrics['reward_mean']:.3f} loss={metrics['loss']:.5f} "
                           f"entropy={metrics['entropy']:.3f} ratio={metrics['ratio_mean']:.4f} "
                           f"clip={metrics['clip_fraction']:.1%} KL(k3)={metrics['reference_kl_k3']:.5f}")
-                    # 同一批回答只写一次，不把复用更新伪装成新的 rollout。
-                    if update_index == 0:
-                        for item in prepared:
-                            for index in range(min(2, len(item.rollout.completions))):
-                                sample = item.samples[index // config.num_generations]
-                                append_jsonl(output_dir / "samples.jsonl", {
-                                    "step": global_step, "id": sample.id, "prompt": sample.prompt,
-                                    "answer": sample.answer, "completion": item.rollout.completions[index],
-                                    "reward": item.rewards[index].item(),
-                                })
+                # 每个新 rollout 的全部 G 个回答都留档，与 log_steps 无关；复用不重复写。
+                if update_index == 0:
+                    for item in prepared:
+                        lengths = item.rollout.completion_mask.sum(-1).tolist()
+                        stops = item.rollout.truncated.tolist()
+                        for index, completion in enumerate(item.rollout.completions):
+                            sample = item.samples[index // config.num_generations]
+                            append_jsonl(output_dir / "samples.jsonl", {
+                                "step": global_step, "id": sample.id, "dataset": sample.dataset,
+                                "group_index": index // config.num_generations,
+                                "generation_index": index % config.num_generations,
+                                "prompt": sample.prompt, "answer": sample.answer,
+                                "completion": completion, "final_answer": extract_final_answer(completion),
+                                "reward": item.rewards[index].item(), "response_tokens": lengths[index],
+                                "truncated": bool(stops[index]),
+                            })
 
             # 3. 窗口复用结束才推进数据游标。若 max_steps 截断复用，剩余次数
             # 直接丢弃；恢复后从下一份数据采样，不重放这一窗口的旧轨迹。
@@ -273,6 +363,23 @@ def train(config, resume: Path | None = None) -> None:
             next_epoch, next_batch = (epoch + 1, 0) if batch_index == len(batches) else (epoch, batch_index)
             final_step = ((config.max_steps > 0 and global_step >= config.max_steps)
                           or (next_epoch == config.epochs))
+            if dev_samples is not None and config.eval_steps and (
+                global_step // config.eval_steps > window_start_step // config.eval_steps or final_step
+            ):
+                try:
+                    dev_metrics, dev_records = evaluate_dev(
+                        bundle, engine, config, dev_samples, reward_function, global_step,
+                    )
+                except Exception as error:
+                    record_failure(output_dir, global_step, "dev_evaluation", error)
+                    raise
+                dev_metrics["data_sha256"] = dev_fingerprint
+                append_jsonl(output_dir / "dev_metrics.jsonl", dev_metrics)
+                for record in dev_records:
+                    append_jsonl(output_dir / "dev_samples.jsonl", {"step": global_step, **record})
+                print(f"开发集 step={global_step} pass@1={dev_metrics['overall']['pass@1']:.3f} "
+                      f"pass@{config.eval_num_samples}={dev_metrics['overall'][f'pass@{config.eval_num_samples}']:.3f} "
+                      f"probe_entropy={dev_metrics['probe']['probe_entropy_mean']:.3f}")
             # 只在完整窗口边界存盘，故无需把缓存轨迹写入检查点。
             # 跨过 save_steps 整除点时延迟保存，最多延迟 updates_per_rollout-1 步。
             crossed_save_boundary = global_step // config.save_steps > window_start_step // config.save_steps

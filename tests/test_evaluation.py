@@ -2,10 +2,50 @@
 
 import unittest
 
-from evaluate import binary_reward, estimate_pass_at_k, summarize_results
+from evaluate import baseline_difficulty_map, binary_reward, estimate_pass_at_k, summarize_results
 
 
 class EvaluationTest(unittest.TestCase):
+    def test_baseline_difficulty_requires_same_data_and_marks_strata(self):
+        base = {"data": {"sha256": "fixed"}, "samples": [
+            {"dataset": "gsm8k", "id": "a", "prompt": "A?", "rewards": [0, 0]},
+            {"dataset": "gsm8k", "id": "b", "prompt": "B?", "rewards": [0, 1]},
+        ]}
+        with self.assertRaisesRegex(ValueError, "SHA256"):
+            baseline_difficulty_map(base, "different")
+        mapping = baseline_difficulty_map(base, "fixed")
+        self.assertEqual(mapping[("gsm8k", "a")][0], "unsolved")
+        self.assertEqual(mapping[("gsm8k", "b")][0], "mixed")
+        records = [
+            {"dataset": "gsm8k", "rewards": [0, 1], "lengths": [2, 2],
+             "truncated": [False, False], "baseline_difficulty": "unsolved"},
+            {"dataset": "gsm8k", "rewards": [1, 1], "lengths": [2, 2],
+             "truncated": [False, False], "baseline_difficulty": "mixed"},
+        ]
+        result = summarize_results(records, [1, 2])
+        self.assertEqual(result["by_baseline_difficulty"]["unsolved"]["pass@1"], 0.5)
+        self.assertEqual(result["by_baseline_difficulty"]["mixed"]["pass@1"], 1.0)
+
+    def test_answer_format_lengths_and_prompt_length_strata(self):
+        records = [
+            {"dataset": "gsm8k", "prompt_tokens": 100, "rewards": [1, 0],
+             "lengths": [5, 10], "truncated": [False, True],
+             "completions": [r"Done \boxed{2}", "unfinished"]},
+            {"dataset": "gsm8k", "prompt_tokens": 300, "rewards": [0, 0],
+             "lengths": [20, 30], "truncated": [True, False],
+             "completions": [r"Wrong \boxed{9}", "unfinished"]},
+        ]
+        result = summarize_results(records, [1, 2], max_prompt_length=256)
+        overall = result["overall"]
+        self.assertEqual(overall["format_rate"], 0.5)
+        self.assertEqual(overall["answer_accuracy_given_extracted"], 0.5)
+        self.assertEqual(overall["truncated_unparseable_fraction"], 0.25)
+        self.assertEqual(overall["response_length_p90"], 30)
+        self.assertEqual(overall["correct_response_length"], 5)
+        self.assertEqual(overall["prompt_truncation_fraction"], 0.5)
+        self.assertEqual(result["by_prompt_length"]["0-128"]["pass@1"], 0.5)
+        self.assertEqual(result["by_prompt_length"]["257+"]["pass@1"], 0.0)
+
     def test_pass_at_one_is_mean_success_rate(self):
         self.assertAlmostEqual(estimate_pass_at_k(8, 2, 1), 0.25)
 

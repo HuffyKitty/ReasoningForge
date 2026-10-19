@@ -4,7 +4,7 @@
 N=B*G 为回答总数，R 为当前 batch 的回答补齐长度。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import Tensor
@@ -14,6 +14,9 @@ from torch import Tensor
 class LossOutput:
     loss: Tensor
     metrics: dict[str, float]
+    # 只含有效 token 的一维 CPU 向量，供训练器跨 microbatch 精确汇总。
+    # 例如，先拼接 ratio 再取 p99；不能平均各 microbatch 的 p99。
+    diagnostics: dict[str, Tensor] = field(default_factory=dict)
 
 
 def group_advantages(rewards: Tensor, num_generations: int, epsilon: float = 1e-4) -> Tensor:
@@ -64,7 +67,8 @@ def grpo_loss(
     advantage = advantages.float().detach().unsqueeze(1)
     if not torch.isfinite(current).all() or not torch.isfinite(old).all() or not torch.isfinite(advantage).all():
         raise FloatingPointError("有效位置的 log-prob/advantage 包含 NaN/Inf")
-    ratio = torch.exp(current - old)
+    log_ratio = current - old
+    ratio = torch.exp(log_ratio)
     clipped = ratio.clamp(1 - clip_low, 1 + clip_high)
     # 正优势鼓励提高概率，负优势鼓励降低概率；min 选较保守的收益。
     surrogate = torch.minimum(ratio * advantage, clipped * advantage)
@@ -89,11 +93,35 @@ def grpo_loss(
         active_clip = ((ratio > 1 + clip_high) & (advantage > 0)) | (
             (ratio < 1 - clip_low) & (advantage < 0)
         )
+        positive = mask_bool & (advantage > 0)
+        negative = mask_bool & (advantage < 0)
+        positive_clipped = positive & active_clip
+        negative_clipped = negative & active_clip
+        valid_ratio = ratio[mask_bool]
+        valid_log_ratio = log_ratio[mask_bool]
+        quantiles = torch.tensor([0.05, 0.50, 0.95, 0.99], dtype=ratio.dtype, device=ratio.device)
+        ratio_quantiles = torch.quantile(valid_ratio, quantiles)
+        log_ratio_quantiles = torch.quantile(valid_log_ratio, quantiles)
         metrics = {
             "loss": loss.item(),
             "policy_loss": ((-surrogate * mask).sum() / mask.sum()).item(),
             "reference_kl_k3": ((kl * mask).sum() / mask.sum()).item(),
             "ratio_mean": ((ratio * mask).sum() / mask.sum()).item(),
             "clip_fraction": ((active_clip.float() * mask).sum() / mask.sum()).item(),
+            # 分母分别是正、负优势的有效 token 数；若该类不存在，定义为 0。
+            "positive_clip_fraction": (positive_clipped.sum() / positive.sum().clamp_min(1)).item(),
+            "negative_clip_fraction": (negative_clipped.sum() / negative.sum().clamp_min(1)).item(),
         }
-    return LossOutput(loss, metrics)
+        for label, value in zip(("p05", "p50", "p95", "p99"), ratio_quantiles):
+            metrics[f"ratio_{label}"] = value.item()
+        for label, value in zip(("p05", "p50", "p95", "p99"), log_ratio_quantiles):
+            metrics[f"log_ratio_{label}"] = value.item()
+        diagnostics = {
+            "ratio": valid_ratio.detach().cpu(),
+            "log_ratio": valid_log_ratio.detach().cpu(),
+            "positive_advantage": positive[mask_bool].detach().cpu(),
+            "negative_advantage": negative[mask_bool].detach().cpu(),
+            "positive_clipped": positive_clipped[mask_bool].detach().cpu(),
+            "negative_clipped": negative_clipped[mask_bool].detach().cpu(),
+        }
+    return LossOutput(loss, metrics, diagnostics)

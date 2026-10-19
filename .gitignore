@@ -1,4 +1,5 @@
 .venv/
+.conda/
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -9,5 +10,8 @@ runs/
 models/
 data/raw/
 data/*_train.jsonl
+data/*_train_split.jsonl
+data/*_dev.jsonl
+data/*_all.jsonl
 data/*_test.jsonl
 data/*_validation.jsonl
