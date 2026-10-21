@@ -27,7 +27,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def create_tiny_model(path: Path) -> dict[str, torch.Tensor]:
-    """使用 HF 官方模型类构造随机权重，避免把 MiniMind 的模型接口带进来。"""
+    """使用 HF 官方模型类构造随机权重，验证标准 CausalLM 接口的训练通路。"""
     torch.manual_seed(17)
     # 所有 token 都是本地定义的；保留独立 PAD/EOS，便于检查序列 mask。
     words = ["<pad>", "<eos>", "<unk>", "system", "user", "assistant", "Solve", "1", "2", "+", "=", "?"]

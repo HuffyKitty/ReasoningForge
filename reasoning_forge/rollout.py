@@ -1,6 +1,6 @@
 """同步 PyTorch 采样器：先生成，再保存回答、mask 和旧策略 log-prob。
 
-不依赖 MiniMind 的模型类或 vLLM。它牺牲一些吞吐量，换取易读的数据流，
+基于 Transformers 的模型生成接口，保持易读的数据流，
 后续可以用具有相同返回值的高性能 rollout engine 替换。
 """
 
@@ -170,7 +170,7 @@ class PytorchRolloutEngine:
                     mask_chunk, eos_chunk = build_completion_mask(completion_chunk, _eos_ids(self.bundle))
                     attention_chunk = torch.cat([prompt_mask[start:end], mask_chunk], dim=1)
                     # 不读取经过 top-p/温度等变换的 generation scores。旧/新策略都
-                    # 使用原始模型分布，与 MiniMind 的约定一致；首次更新 ratio≈1。
+                    # 使用原始模型分布计算新旧策略概率；首次更新 ratio≈1。
                     # 若 temperature!=1 或 top-p/top-k 截断，采样行为分布与这个
                     # 原始分布并不完全相同；严格 on-policy 基线请选择 1/1/0。
                     chunk_logps, _ = compute_token_stats(

@@ -1,8 +1,8 @@
 # ReasoningForge · 推理工坊
 
-把读懂的 MiniMind GRPO 变成可以替换基座、检查训练行为、逐步做消融的独立实验项目。
+基于 PyTorch 手写 GRPO 训练流程，面向数学推理模型的后训练与消融实验，支持替换基座模型、检查训练行为和对比算法改进。
 
-保留 MiniMind 的主线：**多回答采样 → 奖励 → 组内相对优势 → policy ratio/clipping → KL → mask → 反向传播**。模型改用 Hugging Face `AutoModelForCausalLM` / `AutoTokenizer`；可以加载 Qwen 等 Dense decoder-only 模型的官方权重，也可以训练完整参数或 PEFT LoRA。代码中的中文注释解释整体关系、张量维度和关键设计。
+训练主线：**多回答采样 → 奖励 → 组内相对优势 → policy ratio/clipping → KL → mask → 反向传播**。组内优势、策略损失、轨迹复用和优化循环在项目中显式实现；模型与分词器通过 Hugging Face `AutoModelForCausalLM` / `AutoTokenizer` 加载，支持 Qwen 等 Dense decoder-only 模型的全参数训练或 PEFT LoRA。代码中的中文注释解释整体关系、张量维度和关键设计。
 
 当前提供标准 GRPO、Dynamic Sampling、非对称 clipping、sequence/token 两种损失归一化、规则奖励、同步 PyTorch rollout、训练恢复、固定开发集监控和 pass@k 评估。另提供 DAPO-Math-17k 去重划分、原始 `Answer:` 格式奖励与单因素实验配置。**Overlong Reward Shaping 尚未实现；本项目不是完整 DAPO 的复现。**
 
@@ -16,7 +16,7 @@ Qwen2.5-1.5B-Instruct 的 GSM8K 1200 步对照和数据准备见 [DAPO 消融与
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 
-# 与本机已有 MiniMind 验证环境一致的 CUDA 12.6 构建；CPU 可换成 /whl/cpu。
+# 使用已验证的 CUDA 12.6 构建；CPU 可换成 /whl/cpu。
 .\.venv\Scripts\python.exe -m pip install torch==2.7.0 --index-url https://download.pytorch.org/whl/cu126
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
@@ -133,7 +133,7 @@ runs/qwen05b_grpo/
 
 ## 实现依据
 
-算法主线参考本工作区 MiniMind `trainer/train_grpo.py` / `trainer/rollout_engine.py`，通用适配和工程边界在本目录实现；没有修改原 MiniMind 文件。保留 Apache-2.0 许可证，来源记录见 [NOTICE](NOTICE)。
+项目使用 PyTorch 显式实现 GRPO 的采样、组内优势、裁剪目标、KL 约束、反向传播和训练恢复。Hugging Face 与 PEFT 提供模型加载、分词和 LoRA 适配。项目采用 [Apache-2.0 许可证](LICENSE)，来源声明见 [NOTICE](NOTICE)。
 
 - [Hugging Face Auto Classes](https://huggingface.co/docs/transformers/v4.57.1/en/model_doc/auto)
 - [Hugging Face Generation API](https://huggingface.co/docs/transformers/v4.57.1/en/main_classes/text_generation)

@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 @dataclass
 class TrainConfig:
-    # HF 仓库名或本地 save_pretrained 目录；不再依赖 MiniMindConfig / .pth。
+    # HF 仓库名或本地 save_pretrained 目录；通过 Transformers 加载模型。
     model_name_or_path: str = "Qwen/Qwen2.5-0.5B-Instruct"
     revision: str | None = None
     trust_remote_code: bool = False
@@ -59,7 +59,7 @@ class TrainConfig:
     beta: float = 0.02
     clip_low: float = 0.2
     clip_high: float = 0.2  # 与 clip_low 分开，方便后续 Clip-Higher 消融。
-    loss_reduction: str = "sequence"  # sequence: MiniMind/GRPO；token: 全局有效 token 平均。
+    loss_reduction: str = "sequence"  # sequence: 每条回答平均后再平均；token: 全局有效 token 平均。
     dynamic_sampling: bool = False
     # 最多生成目标有效题目数的多少倍候选；耗尽时失败，不偷偷缩小训练 batch。
     dynamic_sampling_max_candidates_factor: int = 16

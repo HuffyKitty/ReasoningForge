@@ -349,7 +349,7 @@ def train(config, resume: Path | None = None) -> None:
     print(f"Actor 总参数 {count:,}；可训练参数 {sum(p.numel() for p in trainable):,}；device={bundle.device}")
     print(f"训练 {len(samples)} 道题，每题 {config.num_generations} 个回答；日志：{output_dir}")
     if config.temperature != 1 or config.top_p != 1 or config.top_k != 0:
-        print("采样启用了分布变换；ratio 仍按 MiniMind 惯例使用未变换的模型概率。严格基线建议 temperature=1, top_p=1, top_k=0。")
+        print("采样启用了分布变换；ratio 使用未变换的模型概率。严格基线建议 temperature=1, top_p=1, top_k=0。")
 
     for epoch in range(start_epoch, config.epochs):
         batches = shuffled_batches(samples, config, epoch)

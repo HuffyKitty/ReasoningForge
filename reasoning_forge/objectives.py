@@ -1,4 +1,4 @@
-"""GRPO 数学核心：复用 MiniMind 的组内优势 → ratio → clipping → mask 主线。
+"""GRPO 数学核心：组内优势归一化 → 新旧策略概率比 → 裁剪 → 有效 token 掩码。
 
 本文件不认识 Qwen/Tokenizer/LoRA；它只接收已经对齐的 [N,R] 矩阵。
 N=B*G 为回答总数，R 为当前 batch 的回答补齐长度。
@@ -26,7 +26,7 @@ def group_advantages(rewards: Tensor, num_generations: int, epsilon: float = 1e-
     if rewards.numel() == 0 or not torch.isfinite(rewards).all():
         raise ValueError("奖励不能为空或包含 NaN/Inf")
     grouped = rewards.float().detach().view(-1, num_generations)
-    # 与 MiniMind 一致，使用总体标准差 unbiased=False，不引入 G/(G-1) 修正。
+    # 使用总体标准差（方差分母为 G，unbiased=False）做组内归一化。
     advantages = (grouped - grouped.mean(dim=1, keepdim=True)) / (
         grouped.std(dim=1, unbiased=False, keepdim=True) + epsilon
     )
@@ -77,7 +77,8 @@ def grpo_loss(
     if beta:
         reference = ref_logps.float().detach().masked_fill(~mask_bool, 0)
         difference = reference - current
-        # MiniMind 同款 k3 样本估计。非负的逐 token 值，不是完整词表上的精确 KL。
+        # k3 样本估计 exp(log_ref-log_actor) - (log_ref-log_actor) - 1。
+        # 这是非负的逐 token 样本值，不是完整词表上的精确 KL。
         kl = torch.exp(difference) - difference - 1
     per_token_loss = -surrogate + beta * kl
     mask = mask_bool.to(per_token_loss.dtype)

@@ -1,4 +1,4 @@
-"""统一数据格式与 Prompt 渲染；这里不依赖 MiniMind 的特殊 token。
+"""统一数据格式与 Prompt 渲染；使用模型自身的 tokenizer 和 chat template。
 
 数据流：本地 JSONL -> PromptSample -> 模型自己的 chat template -> rollout。
 训练文件和评测文件由调用方分别加载，本模块不会自动混合数据集或划分。

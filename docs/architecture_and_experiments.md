@@ -23,18 +23,18 @@ flowchart TD
 
 三个数据面独立：Tokenizer 决定输入格式；Verifier 决定正确性；Objective 决定如何把奖励转换成梯度。换 Qwen/Llama 通常只动模型配置和 LoRA 目标层，不改 GRPO 公式。换任务主要动数据和 verifier。
 
-## 对照 MiniMind 阅读
+## 手写 GRPO 的模块分工
 
-| MiniMind 位置 | 本项目位置 | 改造原因 |
+| 训练环节 | 实现位置 | 职责 |
 |---|---|---|
-| `trainer_utils.init_model` | `models.load_bundle` | 固定 MiniMind 类与 .pth 改为通用 HF 目录/仓库 |
-| `RLAIFDataset` | `data.load_jsonl/render_prompt` | 不写死 im_start/im_end，也不依赖最后一条 assistant |
-| `calculate_rewards` | `rewards.math_reward` / 插件 | 通用 RM 分数改成数学可验证奖励，标准答案留在模型外 |
-| `create_rollout_engine` | `PytorchRolloutEngine` | 同步采样、微批、EOS和实际 attention mask |
-| `grpo_train_epoch` 中公式 | `objectives.py` | 与模型分离，单独验证梯度和归一化 |
-| `.pth` checkpoint | HF `save_pretrained` + 训练状态 | 区分 adapter、完整权重、恢复优化器/游标/RNG |
+| 模型初始化 | `models.load_bundle` | 加载 HF 模型与分词器，配置 Actor、冻结 Reference 和 LoRA |
+| 数据与提示 | `data.load_jsonl/render_prompt` | 校验 JSONL，使用模型自身的 chat template 渲染提示 |
+| 答案判分 | `rewards.math_reward` / 插件 | 验证最终答案，标准答案留在模型输入外 |
+| 回答采样 | `PytorchRolloutEngine` | 同步采样、微批、EOS、attention mask 和旧策略概率 |
+| 优化目标 | `objectives.py` | 计算组内优势、ratio、裁剪、KL 和损失归一化 |
+| 检查点 | HF `save_pretrained` + 训练状态 | 区分 adapter、完整权重，恢复优化器、数据游标和随机数状态 |
 
-MiniMind 本地脚本的默认 `loss_type` 是 CISPO。本项目明确以标准 clipped GRPO 为起点，没有把 CISPO 当作 vanilla GRPO。
+本项目以标准 clipped GRPO 为起点，显式计算组内相对优势和裁剪策略目标，再通过配置控制消融项。
 
 ## 一步训练到底保存了哪些材料
 
@@ -74,7 +74,7 @@ A_i=\frac{r_i-\mu}{\sigma+10^{-4}},\qquad
 
 其中 `old` 是这批回答采样时的模型，`ref` 是实验开始时的固定基座。它们可以最初相同，训练后职责不同。KL 项是采到 token 上的 k3 估计，不是对整个词表精确求和的 KL。
 
-- `sequence`：每条回答先对有效 token 平均，再对回答平均，与 MiniMind 主线一致。
+- `sequence`：每条回答先对有效 token 平均，再对回答平均，使每条回答权重相同。
 - `token`：整个优化窗口的有效 token 一起平均，长回答包含更多 token。跨 micro batch/累积窗口仍使用同一个全局分母。
 
 同题全对或全错时，组内奖励方差为 0，`A=0`。有 KL 时仍可能因 KL 产生更新，不能把“无 policy gradient”误称为“所有参数绝对不动”。当前只记录这类组的比例，**没有用额外长度分制造优势，也没有自动跳过它们**。
@@ -96,7 +96,7 @@ A_i=\frac{r_i-\mu}{\sigma+10^{-4}},\qquad
 
 默认 `temperature=1,top_p=1,top_k=0`，让采样与原始策略一致。代码中的新/旧/ref log-prob 都取未经过采样截断的模型分布。改用非1温度或top-p后，采样行为分布不同；本项目不会自动进行重要性校正，请把这种改动作为单独实验设置。
 
-优化器使用 AdamW、固定学习率和可选梯度范数裁剪；当前没有 warmup 或学习率调度器。它与原 MiniMind 脚本的 cosine 调度不同。后续比较论文设置时，应明确记录并对齐这些训练超参数。
+优化器使用 AdamW、固定学习率和可选梯度范数裁剪；当前没有 warmup 或学习率调度器。比较不同实验或论文设置时，应明确记录并对齐这些训练超参数。
 
 ## 消融路线
 
