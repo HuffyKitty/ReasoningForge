@@ -4,7 +4,9 @@
 
 保留 MiniMind 的主线：**多回答采样 → 奖励 → 组内相对优势 → policy ratio/clipping → KL → mask → 反向传播**。模型改用 Hugging Face `AutoModelForCausalLM` / `AutoTokenizer`；可以加载 Qwen 等 Dense decoder-only 模型的官方权重，也可以训练完整参数或 PEFT LoRA。代码中的中文注释解释整体关系、张量维度和关键设计。
 
-当前提供标准 GRPO、非对称 clipping、sequence/token 两种损失归一化、规则奖励、同步 PyTorch rollout、训练恢复、固定开发集监控和 pass@k 评估。**Dynamic Sampling 与 Overlong Reward Shaping 尚未实现；这是一份复现实验基础，并非完整 DAPO 或图片中成绩的复现结果。**
+当前提供标准 GRPO、Dynamic Sampling、非对称 clipping、sequence/token 两种损失归一化、规则奖励、同步 PyTorch rollout、训练恢复、固定开发集监控和 pass@k 评估。另提供 DAPO-Math-17k 去重划分、原始 `Answer:` 格式奖励与单因素实验配置。**Overlong Reward Shaping 尚未实现；本项目不是完整 DAPO 的复现。**
+
+Qwen2.5-1.5B-Instruct 的 GSM8K 1200 步对照和数据准备见 [DAPO 消融与远程队列](docs/DAPO_消融与远程队列.md)。队列默认不启动 DAPO-Math 试跑；进程接管脚本必须显式指定当前 PID，自动关机也需显式开启。
 
 ## 从这里开始
 

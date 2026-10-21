@@ -10,6 +10,7 @@ import torch
 
 from .data import render_prompt
 from .models import compute_token_stats
+from .rewards import extractor_for_format
 
 
 @contextmanager
@@ -109,7 +110,8 @@ def evaluate_dev(bundle: Any, engine: Any, config: Any, dev_samples: list, rewar
     finally:
         actor.train(was_training)
     ks = sorted({1, config.eval_num_samples})
-    metrics = summarize_results(records, ks, max_prompt_length=config.max_prompt_length)
+    metrics = summarize_results(records, ks, max_prompt_length=config.max_prompt_length,
+                                answer_extractor=extractor_for_format(config.answer_format))
     metrics["step"] = step
     metrics["probe"] = probe
     metrics["num_samples"] = config.eval_num_samples

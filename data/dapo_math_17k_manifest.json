@@ -1,0 +1,27 @@
+{
+  "source_repo": "BytedTsinghua-SIA/DAPO-Math-17k",
+  "revision": "65877096c24ffa7abc4e4fa5edb95cf3413a5674",
+  "raw_sha256": "534375d6bb8630d22ab46a56e11f2ffec1d288d8f7d04099bc82d68948705941",
+  "source_rows": 1791700,
+  "unique_prompts": 17391,
+  "conflicting_prompts_removed": 7,
+  "deduplication_key": "exact prompt text, with all conflicting-answer prompts removed",
+  "split_seed": 42,
+  "splits": {
+    "dev": {
+      "path": "/root/autodl-tmp/ReasoningForge/data/dapo_math_17k_dev.jsonl",
+      "count": 500,
+      "sha256": "9459829f32bbf10836794a5b2e14eed731fe343690a1bbd2fd8534dea28b4524"
+    },
+    "test": {
+      "path": "/root/autodl-tmp/ReasoningForge/data/dapo_math_17k_test.jsonl",
+      "count": 500,
+      "sha256": "18fedb82533bdb27450d6cd49ec9d58e9bdb79224ba96d319df0f0079d8df931"
+    },
+    "train": {
+      "path": "/root/autodl-tmp/ReasoningForge/data/dapo_math_17k_train.jsonl",
+      "count": 16391,
+      "sha256": "23ddf193a53b6ddf3e9996ad95657d3cc3b82a6994d9d495e0dccd6aa0bed2a5"
+    }
+  }
+}

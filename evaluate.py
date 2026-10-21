@@ -19,7 +19,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from reasoning_forge.rewards import extract_final_answer, normalize_answer
+from reasoning_forge.rewards import extract_final_answer, extractor_for_format, normalize_answer
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -77,7 +77,8 @@ def baseline_difficulty_map(payload: dict, expected_sha256: str) -> dict[tuple[s
     return mapping
 
 
-def summarize_results(records: list[dict], ks: list[int], max_prompt_length: int | None = None) -> dict:
+def summarize_results(records: list[dict], ks: list[int], max_prompt_length: int | None = None,
+                      answer_extractor=extract_final_answer) -> dict:
     """先逐题估计再平均，每题等权；同时按 dataset 分层报告。"""
 
     if not records:
@@ -109,7 +110,7 @@ def summarize_results(records: list[dict], ks: list[int], max_prompt_length: int
                 completions = record["completions"]
                 if len(completions) != n:
                     raise ValueError("每题 completions 与 rewards 长度必须一致。")
-                answers = [extract_final_answer(text) for text in completions]
+                answers = [answer_extractor(text) for text in completions]
                 parsed_count += sum(answer is not None for answer in answers)
                 parsed_correct += sum(answer is not None and reward == 1.0 for answer, reward in zip(answers, rewards))
                 truncated_without_answer += sum(stop and answer is None for stop, answer in zip(record["truncated"], answers))
@@ -282,7 +283,8 @@ def main() -> None:
         print(f"已评测 {len(records)}/{len(samples)} 道题")
         del rollout
 
-    metrics = summarize_results(records, ks, max_prompt_length=config.max_prompt_length)
+    metrics = summarize_results(records, ks, max_prompt_length=config.max_prompt_length,
+                                answer_extractor=extractor_for_format(config.answer_format))
     payload = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "metric_description": "Stochastic pass@k estimated by 1-C(n-c,k)/C(n,k); equal weight per prompt. pass@1 is not greedy accuracy.",

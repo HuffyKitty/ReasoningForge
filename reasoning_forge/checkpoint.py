@@ -41,7 +41,8 @@ def write_json(path: Path, value: dict) -> None:
 
 
 def save_checkpoint(bundle, optimizer, config, *, global_step: int, epoch: int,
-                    batch_index: int, fingerprint: str) -> Path:
+                    batch_index: int, fingerprint: str,
+                    candidate_index: int | None = None) -> Path:
     """只在 optimizer.step() 后保存，不保存一半的梯度累积窗口。
 
     epoch/batch_index 指向下一份数据；恢复时不用重采已经完成的 rollout。
@@ -57,6 +58,7 @@ def save_checkpoint(bundle, optimizer, config, *, global_step: int, epoch: int,
     state = {
         "format_version": 1, "global_step": global_step,
         "epoch": epoch, "batch_index": batch_index,
+        "candidate_index": candidate_index,
         "data_fingerprint": fingerprint, "config": config.to_dict(),
         "optimizer": optimizer.state_dict(),
         "python_rng": random.getstate(), "torch_rng": torch.get_rng_state(),

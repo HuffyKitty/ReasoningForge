@@ -46,7 +46,7 @@
 
 这些结果确认算法与工程接口可运行，不证明数学能力提升，也不保证官方0.5B/1.5B模型的显存占用、训练稳定性或论文成绩。正式实验尚需下载/指定基座、准备独立数据划分、核验答案验证器、固定版本与采样预算，再建立真实基线。
 
-完整 DAPO 的 Dynamic Sampling、Overlong Reward Shaping 尚未实现。复杂 MATH 的完整符号等价验证不在默认规则奖励范围内。CPU 的逐位恢复一致性不能推导为所有 GPU、算子和环境下的位级确定性。
+截至该次验证，Dynamic Sampling、Overlong Reward Shaping 尚未实现；Dynamic Sampling 已在后续版本加入，见下方 2026-10-21 记录。复杂 MATH 的完整符号等价验证不在默认规则奖励范围内。CPU 的逐位恢复一致性不能推导为所有 GPU、算子和环境下的位级确定性。
 
 ## 2026-10-19：训练监控与 AutoDL 准备
 
@@ -54,3 +54,11 @@
 - 离线 `scripts/smoke_test.py` 再次通过全参数和 LoRA 两条端到端路径；训练时开发集 `pass@k` 与固定探针熵写入日志，恢复训练和连续训练的最终权重仍逐位一致；训练回答全部 `G` 条均保存。
 - 数据划分/审计/长度检查脚本的离线测试与 CLI `--help` 通过。尚无官方 GSM8K 文件或 Qwen2.5-1.5B 权重；因此 `configs/qwen15b_gsm8k_pilot.json --check-config` 在本机因缺少 `data/gsm8k_train_split.jsonl` 而停止，这是预期的准备缺口。
 - 尚未租用 AutoDL 实例，也未实测 1.5B 显存、吞吐或正式 benchmark 成绩。按 [AutoDL 迁移指南](AutoDL_迁移准备与运行.md)完成数据、模型和环境准备后才能验证这些部分。
+
+## 2026-10-21：Dynamic Sampling 与评测发布检查
+
+- 本地 `python -m unittest discover -s tests -v`：**49 项通过**。新增覆盖候选流跨轮恢复、整组筛选、补齐有效题数和 DAPO `Answer:` 格式奖励。
+- 全部 **16 份训练配置**通过 `load_config` 校验；六份 DAPO-Math 配置每题生成数均为 4。
+- 两份本地同步 PowerShell 脚本通过语法解析；进程接管脚本要求显式 PID，并默认关闭自动关机与 DAPO-Math 试跑。
+- AutoDL 上两组 GSM8K 模型均完成到第 1200 步，并完成同一 500 题开发集的四次与八次采样评估。结果和范围见 [DAPO 消融与远程队列](DAPO_消融与远程队列.md)。DAPO-Math 已完成数据准备，训练按费用要求取消。
+- 本次发布检查未重新下载基座或启动 GPU 训练；Overlong Reward Shaping 仍未实现。

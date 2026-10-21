@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 _BOX_START = re.compile(r"\\boxed\s*\{")
 _HASH_ANSWER = re.compile(r"(?m)^[ \t]*####[ \t]*([^\r\n]*)")
+_ANSWER_LINE = re.compile(r"(?mi)^[ \t]*Answer[ \t]*:[ \t]*([^\r\n]*)")
 _NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\Z")
 _COMMA_NUMBER = re.compile(r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d*)?(?:[eE][+-]?\d+)?\Z")
 
@@ -59,6 +60,24 @@ def extract_final_answer(text: str) -> Optional[str]:
     for match in _HASH_ANSWER.finditer(text):
         candidates.append((match.start(), match.group(1).strip() or None))
     return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def extract_answer_line(text: str) -> Optional[str]:
+    """DAPO-Math 官方提示要求独立的 `Answer: <integer>` 最终答案行。"""
+    if not isinstance(text, str):
+        raise TypeError("completion 必须是字符串。")
+    matches = list(_ANSWER_LINE.finditer(text))
+    if not matches or text[matches[-1].end():].strip():
+        return None
+    return matches[-1].group(1).strip() or None
+
+
+def extractor_for_format(answer_format: str):
+    if answer_format == "boxed":
+        return extract_final_answer
+    if answer_format == "answer_line":
+        return extract_answer_line
+    raise ValueError(f"未知答案格式：{answer_format}")
 
 
 def normalize_answer(answer: str) -> str:
@@ -126,7 +145,15 @@ def _as_number(value: str) -> Optional[Fraction]:
 def math_reward(completion: str, answer: str) -> float:
     """正确最终答案为 1，否则为 0；不额外奖励长度、思考标签或答案出现次数。"""
 
-    extracted = extract_final_answer(completion)
+    return _reward_from_extracted(extract_final_answer(completion), answer)
+
+
+def dapo_math_reward(completion: str, answer: str) -> float:
+    """DAPO-Math 的整数答案和原始 `Answer:` 输出格式。"""
+    return _reward_from_extracted(extract_answer_line(completion), answer)
+
+
+def _reward_from_extracted(extracted: Optional[str], answer: str) -> float:
     if extracted is None:
         return 0.0
     predicted = normalize_answer(extracted)

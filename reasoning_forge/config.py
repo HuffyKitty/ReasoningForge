@@ -36,6 +36,7 @@ class TrainConfig:
     system_prompt: str = "Solve the problem carefully. End with the final answer in \\boxed{...}."
     chat_template_kwargs: dict = field(default_factory=dict)
     reward_function: str = "reasoning_forge.rewards:math_reward"
+    answer_format: str = "boxed"  # boxed: GSM8K；answer_line: DAPO-Math 原始提示。
 
     # B 个题目各生成 G 个回答。micro batch 只控制显存，不改变每题的 G。
     prompt_batch_size: int = 1
@@ -59,6 +60,9 @@ class TrainConfig:
     clip_low: float = 0.2
     clip_high: float = 0.2  # 与 clip_low 分开，方便后续 Clip-Higher 消融。
     loss_reduction: str = "sequence"  # sequence: MiniMind/GRPO；token: 全局有效 token 平均。
+    dynamic_sampling: bool = False
+    # 最多生成目标有效题目数的多少倍候选；耗尽时失败，不偷偷缩小训练 batch。
+    dynamic_sampling_max_candidates_factor: int = 16
     seed: int = 42
     save_steps: int = 10
     log_steps: int = 1
@@ -74,6 +78,7 @@ class TrainConfig:
             "rollout_micro_batch_size", "train_micro_batch_size", "epochs",
             "gradient_accumulation_steps", "updates_per_rollout", "save_steps", "log_steps", "lora_rank", "lora_alpha",
             "eval_num_samples", "eval_limit", "probe_prompts",
+            "dynamic_sampling_max_candidates_factor",
         )
         for name in positive_ints:
             value = getattr(self, name)
@@ -103,6 +108,10 @@ class TrainConfig:
             raise ValueError("prompt_format 只能是 chat 或 plain")
         if self.loss_reduction not in {"sequence", "token"}:
             raise ValueError("loss_reduction 只能是 sequence 或 token")
+        if self.answer_format not in {"boxed", "answer_line"}:
+            raise ValueError("answer_format 只能是 boxed 或 answer_line")
+        if not isinstance(self.dynamic_sampling, bool):
+            raise ValueError("dynamic_sampling 必须是布尔值")
         if self.lora_dropout != 0:
             raise ValueError("为使采样和训练 log-prob 可比较，当前基线要求 lora_dropout=0")
         if self.lora and not self.lora_target_modules:

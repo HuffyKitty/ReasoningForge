@@ -21,10 +21,11 @@ from .checkpoint import (
     save_checkpoint, seed_everything, write_json,
 )
 from .data import load_jsonl, render_prompt
+from .dynamic_sampling import CandidateStream, informative_group_indices, select_rollout_groups
 from .monitoring import prompt_truncation_diagnostics, rollout_diagnostics
 from .models import compute_token_stats, load_bundle
 from .objectives import group_advantages, grpo_loss
-from .rewards import extract_final_answer
+from .rewards import extractor_for_format
 from .rollout import PytorchRolloutEngine, RolloutBatch
 from .validation import evaluate_dev
 
@@ -116,8 +117,65 @@ def prepare_window(window, bundle, engine, reward_function, config) -> list[Prep
     return prepared
 
 
+def prepare_dynamic_window(stream: CandidateStream, candidate_index: int, target_prompts: int,
+                           bundle, engine, reward_function, config) -> tuple[list[PreparedRollout], int, dict]:
+    """补采至固定有效题目数；所有候选都来自同一个旧 Actor。"""
+    prepared: list[PreparedRollout] = []
+    sampled_prompts = sampled_tokens = accepted_prompts = 0
+    max_candidates = target_prompts * config.dynamic_sampling_max_candidates_factor
+    while accepted_prompts < target_prompts:
+        remaining_budget = max_candidates - sampled_prompts
+        if remaining_budget <= 0:
+            raise RuntimeError(
+                f"动态采样达到 {max_candidates} 道候选上限，仍只有 "
+                f"{accepted_prompts}/{target_prompts} 个有效题目组"
+            )
+        count = min(config.prompt_batch_size, target_prompts - accepted_prompts, remaining_budget)
+        current_samples = stream.take(candidate_index, count)
+        candidate_index += count
+        prompts = [render_prompt(sample, bundle.tokenizer, config) for sample in current_samples]
+        rollout = engine.rollout(prompts)
+        rewards = score_answers(
+            current_samples, rollout.completions, config.num_generations, reward_function
+        ).to(bundle.device)
+        sampled_prompts += count
+        sampled_tokens += int(rollout.completion_mask.sum().item())
+        groups = informative_group_indices(rewards, config.num_generations)
+        if not groups:
+            continue
+        selected_rollout = select_rollout_groups(rollout, groups, config.num_generations)
+        selected_rewards = rewards.reshape(-1, config.num_generations)[groups].flatten()
+        advantages = group_advantages(selected_rewards, config.num_generations)
+        if not (selected_rollout.completion_mask.sum(1) > 0).all():
+            raise ValueError("生成了空 token 序列，无法计算 GRPO")
+        reference_logps = None
+        if bundle.reference is not None:
+            pieces = []
+            with torch.no_grad():
+                for first in range(0, selected_rollout.input_ids.size(0), config.train_micro_batch_size):
+                    last = first + config.train_micro_batch_size
+                    lp, _ = compute_token_stats(
+                        bundle.reference, selected_rollout.input_ids[first:last],
+                        selected_rollout.attention_mask[first:last], selected_rollout.prompt_width,
+                    )
+                    pieces.append(lp)
+            reference_logps = torch.cat(pieces).detach()
+        prepared.append(PreparedRollout(
+            [current_samples[group] for group in groups], selected_rollout,
+            selected_rewards, advantages, reference_logps, [prompts[group] for group in groups],
+        ))
+        accepted_prompts += len(groups)
+    return prepared, candidate_index, {
+        "sampled_prompts": sampled_prompts,
+        "sampled_tokens": sampled_tokens,
+        "rejected_prompts": sampled_prompts - accepted_prompts,
+        "sampling_acceptance_rate": accepted_prompts / sampled_prompts,
+    }
+
+
 def window_statistics(prepared: list[PreparedRollout], generations: int,
-                      tokenizer=None, max_prompt_length: int | None = None) -> dict:
+                      tokenizer=None, max_prompt_length: int | None = None,
+                      answer_extractor=None) -> dict:
     """按真实回答数/组数统计，避免最后一小批与完整 batch 被错误地等权平均。"""
     rewards = torch.cat([item.rewards for item in prepared])
     advantages = torch.cat([item.advantages for item in prepared])
@@ -140,6 +198,7 @@ def window_statistics(prepared: list[PreparedRollout], generations: int,
     diagnostics = rollout_diagnostics(
         rewards, [text for item in prepared for text in item.rollout.completions],
         lengths, truncated, generations,
+        **({"answer_extractor": answer_extractor} if answer_extractor is not None else {}),
     )
     stats.update(diagnostics)
     stats["format_rate"] = diagnostics["answer_extraction_rate"]
@@ -262,10 +321,17 @@ def train(config, resume: Path | None = None) -> None:
         raise ValueError("Actor 没有可训练参数；检查 LoRA 目标层名称")
     optimizer = torch.optim.AdamW(trainable, lr=config.learning_rate, weight_decay=config.weight_decay)
     global_step, start_epoch, start_batch = 0, 0, 0
+    candidate_index = 0
     if state:
         optimizer.load_state_dict(state["optimizer"])
         global_step, start_epoch, start_batch = state["global_step"], state["epoch"], state["batch_index"]
+        if config.dynamic_sampling:
+            candidate_index = state.get("candidate_index")
+            if candidate_index is None:
+                raise ValueError("动态采样检查点缺少候选数据游标")
         restore_rng(state)
+    candidate_stream = CandidateStream(samples, config.seed) if config.dynamic_sampling else None
+    answer_extractor = extractor_for_format(config.answer_format)
     write_json(output_dir / "config.json", config.to_dict())
     write_json(output_dir / "environment.json", environment_info())
     write_json(output_dir / "data_manifest.json", {"path": config.data_path, "sha256": fingerprint, "count": len(samples)})
@@ -295,9 +361,24 @@ def train(config, resume: Path | None = None) -> None:
             # 1. 先采齐 K 批，期间不更新 Actor；缓存内所有 old_logps 来自同一旧策略。
             window = batches[batch_index:batch_index + config.gradient_accumulation_steps]
             try:
-                prepared = prepare_window(window, bundle, engine, reward_function, config)
+                if config.dynamic_sampling:
+                    prepared, candidate_index, sampling = prepare_dynamic_window(
+                        candidate_stream, candidate_index, sum(map(len, window)),
+                        bundle, engine, reward_function, config,
+                    )
+                else:
+                    prepared = prepare_window(window, bundle, engine, reward_function, config)
+                    sampling = None
                 statistics = window_statistics(prepared, config.num_generations,
-                                               bundle.tokenizer, config.max_prompt_length)
+                                               bundle.tokenizer, config.max_prompt_length,
+                                               answer_extractor)
+                if sampling is None:
+                    sampling = {
+                        "sampled_prompts": statistics["training_prompts"],
+                        "sampled_tokens": statistics["training_tokens"],
+                        "rejected_prompts": 0,
+                        "sampling_acceptance_rate": 1.0,
+                    }
             except Exception as error:
                 record_failure(output_dir, global_step, "rollout_or_reward", error)
                 raise
@@ -330,9 +411,13 @@ def train(config, resume: Path | None = None) -> None:
                     "next_batch_index": batch_index + len(window),
                     "grad_norm": grad_norm.item(), "learning_rate": optimizer.param_groups[0]["lr"],
                     "seconds": time.perf_counter() - step_begin,
-                    # 复用轨迹不等于重新采样：新增 token/题目只在第一次更新计数。
-                    "generated_tokens": statistics["training_tokens"] if update_index == 0 else 0,
+                    # 动态采样的生成成本包含丢弃的候选；复用时不重复计数。
+                    "generated_tokens": sampling["sampled_tokens"] if update_index == 0 else 0,
                     "prompts": statistics["training_prompts"] if update_index == 0 else 0,
+                    "sampled_prompts": sampling["sampled_prompts"] if update_index == 0 else 0,
+                    "rejected_prompts": sampling["rejected_prompts"] if update_index == 0 else 0,
+                    "sampling_acceptance_rate": sampling["sampling_acceptance_rate"],
+                    "candidate_index": candidate_index if config.dynamic_sampling else None,
                 })
                 append_jsonl(output_dir / "metrics.jsonl", metrics)
                 if global_step % config.log_steps == 0:
@@ -352,7 +437,7 @@ def train(config, resume: Path | None = None) -> None:
                                 "group_index": index // config.num_generations,
                                 "generation_index": index % config.num_generations,
                                 "prompt": sample.prompt, "answer": sample.answer,
-                                "completion": completion, "final_answer": extract_final_answer(completion),
+                                "completion": completion, "final_answer": answer_extractor(completion),
                                 "reward": item.rewards[index].item(), "response_tokens": lengths[index],
                                 "truncated": bool(stops[index]),
                             })
@@ -385,7 +470,8 @@ def train(config, resume: Path | None = None) -> None:
             crossed_save_boundary = global_step // config.save_steps > window_start_step // config.save_steps
             if crossed_save_boundary or final_step:
                 path = save_checkpoint(bundle, optimizer, config, global_step=global_step,
-                    epoch=next_epoch, batch_index=next_batch, fingerprint=fingerprint)
+                    epoch=next_epoch, batch_index=next_batch, fingerprint=fingerprint,
+                    candidate_index=candidate_index if config.dynamic_sampling else None)
                 print(f"检查点：{path}")
             del prepared
         start_batch = 0

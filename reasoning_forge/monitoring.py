@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any
+from typing import Any, Callable
 
 import torch
 
@@ -27,6 +27,7 @@ def rollout_diagnostics(
     completion_mask: torch.Tensor,
     truncated: torch.Tensor,
     generations: int,
+    answer_extractor: Callable[[str], str | None] = extract_final_answer,
 ) -> dict[str, float | int | None]:
     """统计一次采样窗口的答案、组别、重复、长度和截断情况。
 
@@ -70,8 +71,7 @@ def rollout_diagnostics(
         raise ValueError("每个回答至少要有一个有效 token。")
     is_truncated = [bool(value) for value in truncated_values.tolist()]
 
-    # 与当前 GSM8K verifier 共用提取规则，确保“有最终答案”有明确语义。
-    answers = [extract_final_answer(text) for text in completions]
+    answers = [answer_extractor(text) for text in completions]
     extracted = [answer is not None for answer in answers]
     parsed_count = sum(extracted)
     truncated_count = sum(is_truncated)
