@@ -1,0 +1,59 @@
+这是供 Linux + RTX 4090 24GB 使用的离线训练包。
+
+一、使用方法
+
+1. 将 ZIP 完整解压到 Linux 文件系统上的目录。不要在压缩包查看器里直接运行。
+2. 在 PyCharm / VS Code 中打开目录，运行 main.py；或者终端执行：
+
+   python main.py
+
+入口会自动校验文件、解压包内 Python 3.11、创建独立 .venv、从本地 wheelhouse
+安装固定版本 CUDA 12.6 / PyTorch 环境，再启动实验。无需账号、SSH 密钥或联网。
+系统需已有可启动 main.py 的 Python 3.8+ 和兼容 CUDA 12.6 的 NVIDIA 驱动。
+不要求额外安装 CUDA toolkit。请至少预留 25GB 磁盘空间。
+若使用 WSL，请解压到 Linux 的 /home 等文件系统，不要放在 /mnt/c、/mnt/f 下。
+
+二、默认实验
+
+Qwen2.5-1.5B-Instruct 原始模型 + DAPO-Math-17k + 标准 GRPO。
+使用 LoRA，不从之前 GSM8K 的训练结果继续训练。
+训练集 16,391 题；独立开发集、测试集各 500 题。
+默认 1 epoch，4,098 次优化器更新，每题生成 4 个回答。
+提示词上限 2,048 token，回答上限 1,024 token。
+先在测试集评估原始模型，再训练，再在相同测试集评估最终模型。
+两次测试均每题采样 4 次，输出 pass@1、pass@4、逐题回答和训练前后差值。
+默认不会启动其他消融实验，也不会自动关闭朋友的电脑。
+
+三、先检查或小规模试跑
+
+只安装虚拟环境：python main.py --prepare-only
+检查 GPU、数据和预算：python main.py --check-only
+单独进行两步真实模型试跑：python main.py --smoke-test
+
+两步试跑与完整 benchmark 存入不同目录，试跑分数不作为正式结论。
+
+四、在 SSH 中运行
+
+python main.py --detach
+python main.py --status
+
+--detach 使后台训练不受 SSH 终端关闭影响。直接运行 main.py 默认在前台，
+请保留运行窗口。数据、模型、checkpoint 和日志都保存在解压目录内。
+程序异常时停止后续阶段；再次运行会复用已完成的评估并从完整检查点恢复。
+若在首个检查点前中断，请保留原输出，重新解压到新目录开始。
+
+五、结果位置
+
+对照结果：runs/dapo_math_grpo_g4/benchmark_comparison.json
+最终模型：runs/dapo_math_grpo_g4/train/final/
+检查点：runs/dapo_math_grpo_g4/train/checkpoint-*/
+训练和评估日志：logs/dapo_math_grpo_g4/
+
+final/ 是 LoRA adapter，推理时需配合包内的原始模型。
+完整一轮可能需要较长时间；可先两步试跑，测到实际吞吐后估算耗时。
+
+后续单因素实验需要显式执行：
+python main.py --variant clip_higher
+python main.py --variant token_loss
+
+这两个实验仍从相同原始模型开始，数据划分和四次采样保持一致。

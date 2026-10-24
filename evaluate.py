@@ -206,7 +206,7 @@ def main() -> None:
     from reasoning_forge.config import load_config
     from reasoning_forge.data import load_jsonl, render_prompt
     from reasoning_forge.models import load_bundle
-    from reasoning_forge.rollout import PytorchRolloutEngine
+    from reasoning_forge.rollout import PytorchRolloutEngine, generation_prompt_batch_size
     from reasoning_forge.trainer import load_reward_function, score_answers
 
     config = load_config(_project_path(args.config))
@@ -252,8 +252,9 @@ def main() -> None:
     engine = PytorchRolloutEngine(bundle, config)
     ks = sorted(set(args.k))
     records = []
-    for first in range(0, len(samples), config.prompt_batch_size):
-        current = samples[first:first + config.prompt_batch_size]
+    evaluation_batch_size = generation_prompt_batch_size(config, args.num_samples)
+    for first in range(0, len(samples), evaluation_batch_size):
+        current = samples[first:first + evaluation_batch_size]
         prompts = [render_prompt(sample, bundle.tokenizer, config) for sample in current]
         prompt_lengths = [len(row) for row in bundle.tokenizer(
             prompts, add_special_tokens=False, truncation=False, padding=False,

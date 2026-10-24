@@ -74,6 +74,7 @@ def evaluate_dev(bundle: Any, engine: Any, config: Any, dev_samples: list, rewar
     整次评测包括熵探针都置于隔离 RNG 内，不会挪动下一批训练 rollout。
     """
     from evaluate import binary_reward, summarize_results
+    from .rollout import generation_prompt_batch_size
 
     selected = dev_samples[:config.eval_limit]
     if not selected:
@@ -84,8 +85,9 @@ def evaluate_dev(bundle: Any, engine: Any, config: Any, dev_samples: list, rewar
     actor.eval()
     try:
         with isolated_sampling_rng(bundle.device, config.seed + 1_000_003), torch.no_grad():
-            for first in range(0, len(selected), config.prompt_batch_size):
-                current = selected[first:first + config.prompt_batch_size]
+            evaluation_batch_size = generation_prompt_batch_size(config, config.eval_num_samples)
+            for first in range(0, len(selected), evaluation_batch_size):
+                current = selected[first:first + evaluation_batch_size]
                 prompts = [render_prompt(sample, bundle.tokenizer, config) for sample in current]
                 prompt_lengths = [len(row) for row in bundle.tokenizer(
                     prompts, add_special_tokens=False, truncation=False, padding=False,

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Any
 
 import torch
@@ -28,6 +29,7 @@ class RolloutBatch:
     completions: list[str]           # 长度 N，供答案验证器计算 reward
     prompt_width: int
     truncated: torch.Tensor          # [N]：用完预算且没有 EOS 的回答
+    timings: dict[str, float] | None = None
 
 
 def _eos_ids(bundle: ModelBundle) -> list[int]:
@@ -58,6 +60,15 @@ def build_completion_mask(
     # 当前 token 前尚未遇到 EOS 就有效；因而第一个 EOS 也有效。
     previous_eos_count = is_eos.long().cumsum(-1) - is_eos.long()
     return previous_eos_count.eq(0).long(), is_eos.any(-1)
+
+
+def generation_prompt_batch_size(config: Any, num_generations: int) -> int:
+    """评测也按所选生成并行度组批；训练的有效 batch 配置保持原值。"""
+    if num_generations <= 0:
+        raise ValueError("num_generations 必须大于 0")
+    if not getattr(config, "rollout_batch_across_window", False):
+        return config.prompt_batch_size
+    return max(config.prompt_batch_size, config.rollout_micro_batch_size // num_generations)
 
 
 class PytorchRolloutEngine:
@@ -150,6 +161,16 @@ class PytorchRolloutEngine:
         micro_batch_size = getattr(self.config, "rollout_micro_batch_size", 2)
         if micro_batch_size <= 0:
             raise ValueError("rollout_micro_batch_size 必须大于 0。")
+        logp_micro_batch_size = getattr(self.config, "train_micro_batch_size", micro_batch_size)
+        if logp_micro_batch_size <= 0:
+            raise ValueError("train_micro_batch_size 必须大于 0。")
+        generation_seconds = 0.0
+        logp_seconds = 0.0
+
+        def synchronize() -> None:
+            if self.bundle.device.type == "cuda":
+                torch.cuda.synchronize(self.bundle.device)
+
         sequence_chunks: list[torch.Tensor] = []
         mask_chunks: list[torch.Tensor] = []
         logp_chunks: list[torch.Tensor] = []
@@ -159,6 +180,8 @@ class PytorchRolloutEngine:
             with torch.no_grad():
                 for start in range(0, len(expanded_prompts), micro_batch_size):
                     end = start + micro_batch_size
+                    synchronize()
+                    generation_begin = time.perf_counter()
                     generated_chunk = actor.generate(
                         input_ids=prompt_ids[start:end],
                         attention_mask=prompt_mask[start:end],
@@ -166,6 +189,8 @@ class PytorchRolloutEngine:
                         # Transformers>=4.50 否则可能又从仓库恢复 top-k 等默认值。
                         use_model_defaults=False,
                     )
+                    synchronize()
+                    generation_seconds += time.perf_counter() - generation_begin
                     completion_chunk = generated_chunk[:, prompt_width:]
                     mask_chunk, eos_chunk = build_completion_mask(completion_chunk, _eos_ids(self.bundle))
                     attention_chunk = torch.cat([prompt_mask[start:end], mask_chunk], dim=1)
@@ -173,9 +198,20 @@ class PytorchRolloutEngine:
                     # 使用原始模型分布计算新旧策略概率；首次更新 ratio≈1。
                     # 若 temperature!=1 或 top-p/top-k 截断，采样行为分布与这个
                     # 原始分布并不完全相同；严格 on-policy 基线请选择 1/1/0。
-                    chunk_logps, _ = compute_token_stats(
-                        actor, generated_chunk, attention_chunk, prompt_width, temperature=1.0
-                    )
+                    logp_begin = time.perf_counter()
+                    # 生成仅需最后位置的 logits；整句重算概率需要 [N,L,V]。
+                    # 分开两个 batch 大小，提高生成并行度时不放大整句 logits。
+                    logp_parts = []
+                    for first in range(0, generated_chunk.size(0), logp_micro_batch_size):
+                        last = first + logp_micro_batch_size
+                        part, _ = compute_token_stats(
+                            actor, generated_chunk[first:last], attention_chunk[first:last],
+                            prompt_width, temperature=1.0,
+                        )
+                        logp_parts.append(part)
+                    chunk_logps = torch.cat(logp_parts)
+                    synchronize()
+                    logp_seconds += time.perf_counter() - logp_begin
                     sequence_chunks.append(generated_chunk)
                     mask_chunks.append(mask_chunk)
                     logp_chunks.append(chunk_logps)
@@ -201,7 +237,9 @@ class PytorchRolloutEngine:
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
 
         # decode 使用有效前缀，防止 pad token 与普通文本混到答案验证中。
-        text_ids = [row[mask.bool()].tolist() for row, mask in zip(completion_ids, completion_mask)]
+        cpu_ids = completion_ids.cpu()
+        lengths = completion_mask.sum(-1).cpu().tolist()
+        text_ids = [row[:length].tolist() for row, length in zip(cpu_ids, lengths)]
         completions = tokenizer.batch_decode(text_ids, skip_special_tokens=True)
         truncated = ~has_eos & (completion_mask.sum(-1) >= budget)
         return RolloutBatch(
@@ -213,4 +251,5 @@ class PytorchRolloutEngine:
             completions=completions,
             prompt_width=prompt_width,
             truncated=truncated,
+            timings={"generation_seconds": generation_seconds, "old_logp_seconds": logp_seconds},
         )

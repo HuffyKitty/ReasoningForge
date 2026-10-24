@@ -15,7 +15,7 @@ from tokenizers.pre_tokenizers import Whitespace
 from transformers import GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerFast
 
 from reasoning_forge.models import ModelBundle, compute_token_stats, load_bundle
-from reasoning_forge.rollout import PytorchRolloutEngine, build_completion_mask
+from reasoning_forge.rollout import PytorchRolloutEngine, build_completion_mask, generation_prompt_batch_size
 
 
 def tiny_model() -> GPT2LMHeadModel:
@@ -84,6 +84,7 @@ def test_rollout_micro_batches_group_order_mask_and_first_ratio() -> None:
     config = SimpleNamespace(
         num_generations=2, max_prompt_length=8, max_new_tokens=3,
         temperature=1.0, top_p=1.0, top_k=0, rollout_micro_batch_size=2,
+        train_micro_batch_size=1,
     )
     outputs = [torch.tensor([[9, 2, 2], [10, 11, 12]]), torch.tensor([[8, 3], [7, 2]])]
     call_index = 0
@@ -96,8 +97,14 @@ def test_rollout_micro_batches_group_order_mask_and_first_ratio() -> None:
         call_index += 1
         return result
 
-    with patch.object(model, "generate", side_effect=generate):
+    with patch.object(model, "generate", side_effect=generate), patch(
+        "reasoning_forge.rollout.compute_token_stats", wraps=compute_token_stats
+    ) as scoring:
         rollout = PytorchRolloutEngine(bundle, config).rollout(["short", "long"])
+    assert len(scoring.call_args_list) == 4
+    assert all(call.args[1].shape[0] == 1 for call in scoring.call_args_list)
+    assert rollout.timings["generation_seconds"] >= 0
+    assert rollout.timings["old_logp_seconds"] >= 0
     assert model.training  # rollout 应恢复训练模式
     assert call_index == 2
     assert rollout.prompt_width == 3
@@ -162,6 +169,17 @@ def test_load_bundle_offline_disables_dropout_and_freezes_reference(tmp_path: Pa
 
 class RolloutTests(unittest.TestCase):
     """标准库 unittest 即可运行，无需额外安装 pytest。"""
+
+    def test_evaluation_batching_respects_sampling_count_and_profile(self):
+        config = SimpleNamespace(prompt_batch_size=2, rollout_micro_batch_size=16,
+                                 rollout_batch_across_window=False)
+        self.assertEqual(generation_prompt_batch_size(config, 4), 2)
+        config.rollout_batch_across_window = True
+        self.assertEqual(generation_prompt_batch_size(config, 4), 4)
+        self.assertEqual(generation_prompt_batch_size(config, 8), 2)
+        self.assertEqual(config.prompt_batch_size, 2)
+        config.rollout_micro_batch_size = 32
+        self.assertEqual(generation_prompt_batch_size(config, 4), 8)
 
     def test_eos_mask(self) -> None:
         test_completion_mask_keeps_first_eos_and_handles_multiple_eos()

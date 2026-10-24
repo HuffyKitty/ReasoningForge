@@ -1,5 +1,10 @@
 .venv/
 .conda/
+.runtime/
+assets/
+wheelhouse/
+.cache/
+.bootstrap.lock
 /public_key/
 __pycache__/
 *.py[cod]

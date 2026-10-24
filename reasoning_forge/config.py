@@ -44,6 +44,8 @@ class TrainConfig:
     max_prompt_length: int = 256
     max_new_tokens: int = 128
     rollout_micro_batch_size: int = 2
+    # 合并同一个梯度累积窗口的题目用于生成；有效题数、数据游标与优化次数不变。
+    rollout_batch_across_window: bool = False
     train_micro_batch_size: int = 1
     temperature: float = 1.0
     top_p: float = 1.0
@@ -112,6 +114,10 @@ class TrainConfig:
             raise ValueError("answer_format 只能是 boxed 或 answer_line")
         if not isinstance(self.dynamic_sampling, bool):
             raise ValueError("dynamic_sampling 必须是布尔值")
+        if not isinstance(self.rollout_batch_across_window, bool):
+            raise ValueError("rollout_batch_across_window 必须是布尔值")
+        if self.dynamic_sampling and self.rollout_batch_across_window:
+            raise ValueError("当前合并生成优化适用于固定窗口；Dynamic Sampling 请关闭 rollout_batch_across_window")
         if self.lora_dropout != 0:
             raise ValueError("为使采样和训练 log-prob 可比较，当前基线要求 lora_dropout=0")
         if self.lora and not self.lora_target_modules:

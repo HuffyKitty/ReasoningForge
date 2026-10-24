@@ -90,6 +90,10 @@ class PreparedRollout:
 def prepare_window(window, bundle, engine, reward_function, config) -> list[PreparedRollout]:
     """在任何 optimizer.step 之前，准备整个梯度累积窗口的训练材料。"""
     prepared = []
+    if getattr(config, "rollout_batch_across_window", False):
+        # 按原窗口推进 batch_index；只合并生成请求，不扩大一次更新的数据量。
+        # backward_window 使用全窗口分母，也适用于合并后的 PreparedRollout。
+        window = [[sample for batch in window for sample in batch]]
     for current_samples in window:
         prompts = [render_prompt(sample, bundle.tokenizer, config) for sample in current_samples]
         # old_logps 在 rollout 中以 no_grad 计算；一旦缓存，本窗口不再改变。
@@ -279,7 +283,7 @@ def backward_window(actor, prepared: list[PreparedRollout], config, statistics: 
     return aggregate
 
 
-def train(config, resume: Path | None = None) -> None:
+def train(config, resume: Path | None = None, *, allow_rollout_tuning: bool = False) -> None:
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         raise ValueError("当前基线是单设备实现，请直接 python train.py，不要使用 torchrun")
     config.validate()
@@ -293,7 +297,8 @@ def train(config, resume: Path | None = None) -> None:
         if any((sample.dataset, sample.id) in train_ids or sample.prompt.strip() in train_prompts
                for sample in dev_samples):
             raise ValueError("训练集与开发集存在重复题目或重复 dataset/id；请先修正数据划分")
-    state = load_training_state(resume.resolve(), config, fingerprint) if resume else None
+    state = load_training_state(resume.resolve(), config, fingerprint,
+                                allow_rollout_tuning=allow_rollout_tuning) if resume else None
     output_dir = Path(config.output_dir)
     if not resume and output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(f"输出目录非空：{output_dir}。请换 output_dir，或显式 --resume 检查点")
@@ -311,6 +316,17 @@ def train(config, resume: Path | None = None) -> None:
         if existing.get("sha256") != dev_fingerprint:
             raise ValueError("开发集内容已改变，不能将两份开发曲线写入同一实验")
     output_dir.mkdir(parents=True, exist_ok=True)
+    if state and allow_rollout_tuning:
+        changes = {key: {"before": state["config"].get(key, type(config)().to_dict()[key]),
+                         "after": value}
+                   for key, value in config.to_dict().items()
+                   if key in {"rollout_batch_across_window", "rollout_micro_batch_size"}
+                   and state["config"].get(key, type(config)().to_dict()[key]) != value}
+        if changes:
+            write_json(output_dir / f"rollout_tuning_from_step_{state['global_step']:06d}.json", {
+                "checkpoint": str(resume.resolve()), "step": state["global_step"], "changes": changes,
+                "note": "Optimizer and data cursor restored. Sampling order changes; this is not bit-identical continuation.",
+            })
     seed_everything(config.seed)
     bundle = load_bundle(config, resume_model_path=resume.resolve() / "model" if resume else None)
     actor, reference = bundle.actor, bundle.reference
@@ -418,6 +434,10 @@ def train(config, resume: Path | None = None) -> None:
                     "rejected_prompts": sampling["rejected_prompts"] if update_index == 0 else 0,
                     "sampling_acceptance_rate": sampling["sampling_acceptance_rate"],
                     "candidate_index": candidate_index if config.dynamic_sampling else None,
+                    "generation_seconds": sum((item.rollout.timings or {}).get("generation_seconds", 0.0)
+                                               for item in prepared) if update_index == 0 else 0.0,
+                    "old_logp_seconds": sum((item.rollout.timings or {}).get("old_logp_seconds", 0.0)
+                                             for item in prepared) if update_index == 0 else 0.0,
                 })
                 append_jsonl(output_dir / "metrics.jsonl", metrics)
                 if global_step % config.log_steps == 0:

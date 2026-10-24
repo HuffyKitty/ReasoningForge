@@ -1,0 +1,13 @@
+{
+  "model_repo": "Qwen/Qwen2.5-1.5B-Instruct",
+  "model_revision": "989aa7980e4cf806f80c7fef2b1adb7bc71aa306",
+  "model_directory": "models/Qwen2.5-1.5B-Instruct",
+  "python_url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.11.17%2B20261021-x86_64-unknown-linux-gnu-install_only.tar.gz",
+  "python_sha256": "7cc8d9dce9ea23c31267e7f244005c8979da04794b7737a3a30e62b03abeb120",
+  "python_archive": "assets/python-linux-x86_64.tar.gz",
+  "wheel_directory": "wheelhouse/linux-cp311-cu126",
+  "target_python": "3.11",
+  "target_platform": "Linux x86_64, glibc >= 2.28",
+  "target_gpu": "NVIDIA RTX 4090 24GB",
+  "torch_index": "https://download.pytorch.org/whl/cu126"
+}

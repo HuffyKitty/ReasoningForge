@@ -70,7 +70,7 @@ def save_checkpoint(bundle, optimizer, config, *, global_step: int, epoch: int,
     return destination
 
 
-def load_training_state(path: Path, config, fingerprint: str) -> dict:
+def load_training_state(path: Path, config, fingerprint: str, *, allow_rollout_tuning: bool = False) -> dict:
     if not (path / "COMPLETE").is_file():
         raise ValueError(f"检查点不完整或不是本项目检查点：{path}")
     # 这里只读取本项目生成且由用户指定的本地检查点，不用于加载来历不明的 pickle。
@@ -82,6 +82,9 @@ def load_training_state(path: Path, config, fingerprint: str) -> dict:
     # 可以延长训练、调整日志频率，不能悄悄换模型/奖励/优化目标继续同一实验。
     mutable = {"epochs", "max_steps", "save_steps", "log_steps", "eval_steps",
                "output_dir", "data_path", "local_files_only"}
+    if allow_rollout_tuning:
+        # 显式迁移仅允许改变生成的调度方式，不允许改变有效 batch、G 或训练目标。
+        mutable |= {"rollout_batch_across_window", "rollout_micro_batch_size"}
     # 老 checkpoint 没有后来新增的纯监控配置时，按当时等价的默认值比较。
     defaults = type(config)().to_dict()
     changed = [name for name, value in config.to_dict().items()

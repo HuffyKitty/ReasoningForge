@@ -1,0 +1,69 @@
+ReasoningForge: Qwen2.5-1.5B-Instruct + DAPO-Math-17k + GRPO (4 responses)
+
+Target: Linux x86_64 (glibc >= 2.28), NVIDIA RTX 4090 24GB.
+The NVIDIA driver must support CUDA 12.6. A system CUDA toolkit is not required.
+Allow at least 25GB free disk space for unpacking, the venv, and training outputs.
+
+1. Extract the entire folder. Keep main.py, portable/, data/, models/, assets/
+   and wheelhouse/ together. Do not run main.py from inside the zip viewer.
+2. In your IDE, open this folder and run main.py. Or run:
+
+       python main.py
+
+   A system Python >= 3.8 is needed to open main.py. The included CPython 3.11
+   then creates a new .venv inside this folder and installs the local wheels.
+   The base environment is not modified. No login, SSH key or network is needed.
+
+The default experiment is standard GRPO ONLY, with 4 responses per training
+question, 1 epoch over 16,391 training problems, and 4,098 optimizer updates.
+It first measures the original model on 500 independent test questions, trains,
+then evaluates the final adapter on the SAME test questions. Both evaluations
+generate 4 answers/question and report pass@1 and pass@4. Test questions never
+enter the training set. 500 development questions are used for training monitors.
+Answer generation is capped at 1,024 tokens. This is a bounded-length baseline,
+not a complete DAPO implementation or an unlimited-reasoning score.
+Prompt length is capped at 2,048 tokens, preserving every question in the bundled
+train/dev/test splits (maximum observed rendered prompt: 1,569 tokens).
+
+The full run can take a long time. For a separate 2-step real-model smoke test:
+
+       python main.py --smoke-test
+
+To inspect the GPU and data without generation/training:
+
+       python main.py --check-only
+
+To install the environment only:
+
+       python main.py --prepare-only
+
+To run independently of your SSH terminal:
+
+       python main.py --detach
+       python main.py --status
+
+Default execution stays in the foreground; keep the IDE/terminal open until it
+finishes. Use --detach when you need the process to survive terminal closure.
+No script automatically shuts down this computer or starts other experiments.
+
+Logs: logs/dapo_math_grpo_g4/
+Results: runs/dapo_math_grpo_g4/benchmark_comparison.json
+Final adapter: runs/dapo_math_grpo_g4/train/final/
+Recovery checkpoints: runs/dapo_math_grpo_g4/train/checkpoint-*/
+
+Run main.py again to continue completed evaluation stages and resume from the
+latest COMPLETE checkpoint. If interrupted before the first checkpoint, preserve
+the output directory and restart in a fresh extracted folder.
+
+Future experiments (only start them when you explicitly want them):
+
+       python main.py --variant clip_higher
+       python main.py --variant token_loss
+
+All three variants start from the bundled original Qwen checkpoint, never from
+the GSM8K model or another variant. Keep the same data, seed and token budget.
+
+SHA-256 checksums cover the package assets and produced results. Model and
+dependency licenses are retained in their files/wheels; project notices are in
+LICENSE and NOTICE. No author's credentials, machine-specific venv or old
+training runs are included.

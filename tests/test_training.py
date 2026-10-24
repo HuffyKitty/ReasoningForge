@@ -3,13 +3,18 @@
 import copy
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
+from pathlib import Path
+import tempfile
 
 import torch
 
 from reasoning_forge.models import compute_token_stats
+from reasoning_forge.checkpoint import load_training_state
+from reasoning_forge.config import TrainConfig
 from reasoning_forge.objectives import group_advantages, grpo_loss
 from reasoning_forge.rollout import RolloutBatch
-from reasoning_forge.trainer import PreparedRollout, backward_window, window_statistics
+from reasoning_forge.trainer import PreparedRollout, backward_window, window_statistics, prepare_window
 
 
 class TinyPolicy(torch.nn.Module):
@@ -43,6 +48,53 @@ def make_window(model):
 
 
 class TrainingTests(unittest.TestCase):
+    def test_explicit_rollout_migration_still_rejects_training_semantics_changes(self):
+        original = TrainConfig()
+        changed = TrainConfig(rollout_micro_batch_size=16, rollout_batch_across_window=True)
+        state = {"format_version": 1, "data_fingerprint": "same", "config": original.to_dict()}
+        with tempfile.TemporaryDirectory() as temporary:
+            checkpoint = Path(temporary)
+            (checkpoint / "COMPLETE").write_text("ok", encoding="utf-8")
+            with patch("reasoning_forge.checkpoint.torch.load", return_value=state):
+                with self.assertRaisesRegex(ValueError, "训练语义"):
+                    load_training_state(checkpoint, changed, "same")
+                self.assertIs(load_training_state(checkpoint, changed, "same", allow_rollout_tuning=True), state)
+                for key, value in (("prompt_batch_size", 2), ("loss_reduction", "token"), ("num_generations", 8)):
+                    invalid = TrainConfig(**{**changed.to_dict(), key: value})
+                    with self.subTest(key=key), self.assertRaisesRegex(ValueError, key):
+                        load_training_state(checkpoint, invalid, "same", allow_rollout_tuning=True)
+
+    def test_merged_generation_keeps_question_groups_rewards_and_window_size(self):
+        samples = [SimpleNamespace(id=str(index), answer="1") for index in range(8)]
+        window = [samples[index:index + 2] for index in range(0, 8, 2)]
+        bundle = SimpleNamespace(device=torch.device("cpu"), reference=None, tokenizer=None)
+        config = SimpleNamespace(num_generations=4, rollout_batch_across_window=False)
+        calls = []
+
+        def rollout(prompts):
+            calls.append(list(prompts))
+            count = len(prompts) * 4
+            ids = torch.ones(count, 4, dtype=torch.long)
+            return RolloutBatch(ids, ids, ids[:, 2:], ids[:, 2:], torch.zeros(count, 2),
+                                ["1", "0", "1", "0"] * len(prompts), 2,
+                                torch.zeros(count, dtype=torch.bool))
+
+        with patch("reasoning_forge.trainer.render_prompt", side_effect=lambda sample, *_: sample.id):
+            engine = SimpleNamespace(rollout=rollout)
+            reward = lambda completion, answer: float(completion == answer)
+            serial = prepare_window(window, bundle, engine, reward, config)
+            self.assertEqual([len(call) for call in calls], [2, 2, 2, 2])
+            calls.clear()
+            config.rollout_batch_across_window = True
+            merged = prepare_window(window, bundle, engine, reward, config)
+        self.assertEqual(calls, [[str(index) for index in range(8)]])
+        self.assertEqual([sample.id for item in merged for sample in item.samples],
+                         [sample.id for item in serial for sample in item.samples])
+        torch.testing.assert_close(merged[0].rewards, torch.cat([item.rewards for item in serial]))
+        torch.testing.assert_close(merged[0].advantages, torch.cat([item.advantages for item in serial]))
+        self.assertEqual(sum(item.rollout.input_ids.shape[0] for item in merged), 32)
+        self.assertEqual(len(window), 4)
+
     def test_microbatch_accumulation_matches_whole_window_loss_and_gradient(self):
         for reduction in ("sequence", "token"):
             with self.subTest(reduction=reduction):

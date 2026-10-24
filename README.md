@@ -10,6 +10,27 @@ Qwen2.5-1.5B-Instruct 的 GSM8K 1200 步对照和数据准备见 [DAPO 消融与
 
 ## 从这里开始
 
+已打包的 Linux RTX 4090 离线版本可直接运行 `python main.py`，自动使用包内 Python 创建独立 `.venv`、校验模型和数据、安装固定版本 CUDA 依赖，并启动 DAPO-Math 标准 GRPO 基线。训练与测试均每题采样 4 次，默认完整 1 epoch；`python main.py --smoke-test` 单独运行两步检查。包的使用说明见 [START_HERE.txt](portable/START_HERE.txt)。源码仓库不包含大体积模型、Python 运行时或 wheel 文件；请使用准备好的完整离线包。
+
+### DAPO-Math 基线与 Token-level Loss
+
+在包含模型、数据和依赖的 Linux 4090 离线包中，使用相同的 `throughput32` 生成档位分别运行两个独立实验。每题采样 4 次，完整训练集 16,391 题，1 epoch，预计 4,098 次优化器更新。基线采用标准 GRPO 的 sequence-level loss：
+
+```bash
+python main.py --variant grpo --performance-profile throughput32 --detach
+python main.py --status
+```
+
+基线入口依次评测原始模型、训练、评测最终模型。若已有可核对数据划分和评测协议的基座成绩，Token-level Loss 可跳过重复的原始模型评测，直接启动独立训练；先执行检查命令生成并核验其正式配置：
+
+```bash
+python main.py --variant token_loss --performance-profile throughput32 --check-only
+.venv/bin/python scripts/run_dapo_token_loss_direct.py --detach
+python main.py --status
+```
+
+Token-level Loss 训练结束后只评测最终模型，结果位于 `runs/dapo_math_token_loss_g4_throughput32/trained_only_summary.json`。两个实验都从同一个原始 Qwen 模型开始；生成档位、数据划分、随机种子和采样数应保持一致。源码仓库只提供代码、配置及数据哈希清单，不包含数据集、模型、检查点或实验记录。完整离线包的构建入口是 `scripts/prepare_portable_assets.py`。
+
 在 PowerShell 中切到本项目目录。建议建立独立虚拟环境，PyCharm 解释器选择 `ReasoningForge/.venv/Scripts/python.exe`。
 
 ```powershell
